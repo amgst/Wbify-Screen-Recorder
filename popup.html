@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Awesome Screen Recorder Pro</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+    body { width: 360px; background: #ffffff; color: #0f172a; padding: 14px; user-select: none; }
+    
+    /* Header */
+    .header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid #e2e8f0; }
+    .logo { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 14px; color: #0f172a; }
+    .logo-badge { font-size: 9px; background: #dbeafe; color: #1d4ed8; font-weight: 700; padding: 2px 6px; border-radius: 6px; text-transform: uppercase; }
+    .btn-icon-subtle { background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 8px; padding: 5px; cursor: pointer; color: #475569; display: flex; align-items: center; justify-content: center; }
+    .btn-icon-subtle:hover { background: #e2e8f0; color: #0f172a; }
+
+    /* Nav Tabs */
+    .tabs { display: flex; background: #f1f5f9; border-radius: 10px; padding: 3px; margin-bottom: 12px; }
+    .tab-btn { flex: 1; padding: 7px 4px; background: none; border: none; color: #64748b; font-size: 12px; font-weight: 700; cursor: pointer; border-radius: 8px; transition: all 0.15s ease; text-align: center; }
+    .tab-btn.active { background: #ffffff; color: #2563eb; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+
+    /* Target Selector Cards */
+    .target-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+    .target-card { background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 12px; padding: 10px 4px; text-align: center; cursor: pointer; transition: all 0.15s ease; }
+    .target-card:hover { border-color: #93c5fd; background: #eff6ff; }
+    .target-card.selected { border-color: #2563eb; background: #eff6ff; }
+    .target-card svg { width: 22px; height: 22px; margin-bottom: 4px; color: #2563eb; }
+    .target-title { font-size: 11px; font-weight: 700; color: #1e293b; }
+
+    /* Toggles */
+    .toggle-list { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; padding: 4px 10px; margin-bottom: 12px; }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid #e2e8f0; font-size: 12px; font-weight: 600; color: #334155; }
+    .toggle-row:last-child { border-bottom: none; }
+    .toggle-left { display: flex; align-items: center; gap: 7px; }
+    
+    .switch { position: relative; width: 34px; height: 18px; display: inline-block; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #cbd5e1; border-radius: 20px; transition: .2s; }
+    .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 2px; bottom: 2px; background-color: white; border-radius: 50%; transition: .2s; box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
+    input:checked + .slider { background-color: #2563eb; }
+    input:checked + .slider:before { transform: translateX(16px); }
+
+    /* Options Row */
+    .options-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; font-size: 11px; color: #64748b; }
+    .select-pill { background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 8px; padding: 4px 8px; font-size: 11px; font-weight: 600; color: #334155; outline: none; cursor: pointer; }
+
+    /* Action Buttons */
+    .btn-primary { width: 100%; padding: 11px; background: #2563eb; color: white; border: none; border-radius: 12px; font-weight: 800; font-size: 13px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 2px 8px rgba(37,99,235,0.25); transition: background 0.15s; }
+    .btn-primary:hover { background: #1d4ed8; }
+    
+    .rec-dot { width: 10px; height: 10px; border-radius: 50%; background: #ef4444; animation: pulse 1.5s infinite; }
+    @keyframes pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.85); } 100% { opacity: 1; transform: scale(1); } }
+
+    /* Screenshot Grid */
+    .screenshot-grid { display: flex; flex-col; gap: 8px; }
+    .shot-btn { display: flex; align-items: center; gap: 10px; width: 100%; padding: 10px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px; text-align: left; cursor: pointer; transition: all 0.15s; }
+    .shot-btn:hover { background: #eff6ff; border-color: #93c5fd; }
+    .shot-icon { width: 32px; height: 32px; border-radius: 8px; background: #dbeafe; color: #2563eb; display: flex; align-items: center; justify-content: center; shrink-0; }
+    .shot-title { font-size: 12px; font-weight: 700; color: #0f172a; }
+    .shot-desc { font-size: 10px; color: #64748b; }
+
+    /* Footer Tools */
+    .footer-tools { display: flex; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid #e2e8f0; }
+    .tool-link { flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 7px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 11px; font-weight: 700; color: #475569; cursor: pointer; text-decoration: none; transition: all 0.15s; }
+    .tool-link:hover { background: #f1f5f9; color: #0f172a; border-color: #cbd5e1; }
+
+    /* Notification banner */
+    .notice { margin-top: 8px; padding: 6px 8px; background: #fef3c7; border: 1px solid #fde68a; border-radius: 8px; font-size: 10px; color: #92400e; display: none; line-height: 1.3; }
+  </style>
+</head>
+<body>
+  <!-- Top Header -->
+  <div class="header">
+    <div class="logo">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2.5"><rect width="20" height="14" x="2" y="3" rx="2"/><circle cx="12" cy="10" r="3" fill="#ef4444" stroke="none"/></svg>
+      <span>Awesome Recorder</span>
+      <span class="logo-badge">PRO</span>
+    </div>
+    <button class="btn-icon-subtle" id="btnOpenStudio" title="Open Full Studio">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" x2="21" y1="14" y2="3"/></svg>
+    </button>
+  </div>
+
+  <!-- Tabs Navigation -->
+  <div class="tabs">
+    <button class="tab-btn active" id="tabRecord">Record Video</button>
+    <button class="tab-btn" id="tabScreenshot">Screenshot</button>
+    <button class="tab-btn" id="tabLibrary">My Library</button>
+  </div>
+
+  <!-- Panel 1: Record Video -->
+  <div id="panelRecord">
+    <div class="target-grid">
+      <div class="target-card selected" data-target="desktop" id="targetDesktop">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M12 17v4"/><path d="M8 21h8"/></svg>
+        <div class="target-title">Entire Screen</div>
+      </div>
+      <div class="target-card" data-target="tab" id="targetTab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg>
+        <div class="target-title">This Tab</div>
+      </div>
+      <div class="target-card" data-target="camera" id="targetCamera">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>
+        <div class="target-title">Cam Only</div>
+      </div>
+    </div>
+
+    <div class="toggle-list">
+      <div class="toggle-row">
+        <div class="toggle-left">
+          <span>🎙️</span>
+          <span>Microphone</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="micToggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="toggle-row">
+        <div class="toggle-left">
+          <span>📷</span>
+          <span>Webcam PIP Overlay</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="camToggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+
+      <div class="toggle-row">
+        <div class="toggle-left">
+          <span>🔊</span>
+          <span>System / Tab Audio</span>
+        </div>
+        <label class="switch">
+          <input type="checkbox" id="sysAudioToggle" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+    </div>
+
+    <div class="options-row">
+      <span>Countdown:</span>
+      <select class="select-pill" id="countdownSelect">
+        <option value="0">Off (Instant)</option>
+        <option value="3" selected>3 Seconds</option>
+        <option value="5">5 Seconds</option>
+      </select>
+    </div>
+
+    <button class="btn-primary" id="btnStartRecording">
+      <span class="rec-dot"></span>
+      <span>Start Recording</span>
+    </button>
+  </div>
+
+  <!-- Panel 2: Screenshot -->
+  <div id="panelScreenshot" style="display: none;">
+    <div class="screenshot-grid" style="display: flex; flex-direction: column; gap: 8px;">
+      
+      <button class="shot-btn" id="btnCaptureVisible">
+        <div class="shot-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
+        </div>
+        <div>
+          <div class="shot-title">Capture Visible Part</div>
+          <div class="shot-desc">Instant screenshot of current webpage</div>
+        </div>
+      </button>
+
+      <button class="shot-btn" id="btnCaptureSelected">
+        <div class="shot-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></svg>
+        </div>
+        <div>
+          <div class="shot-title">Selected Area (Crop)</div>
+          <div class="shot-desc">Drag crosshairs to crop any rectangular area</div>
+        </div>
+      </button>
+
+      <button class="shot-btn" id="btnCaptureEntireScreen">
+        <div class="shot-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="20" height="14" x="2" y="3" rx="2"/><path d="M12 17v4"/><path d="M8 21h8"/></svg>
+        </div>
+        <div>
+          <div class="shot-title">Entire Screen Snapshot</div>
+          <div class="shot-desc">Capture display frame from any monitor or app</div>
+        </div>
+      </button>
+
+    </div>
+  </div>
+
+  <!-- Panel 3: Library -->
+  <div id="panelLibrary" style="display: none;">
+    <div style="text-align: center; padding: 20px 10px; background: #f8fafc; border: 1px dashed #cbd5e1; border-radius: 12px;">
+      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#64748b" stroke-width="1.5" style="margin-bottom: 8px;"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+      <div style="font-weight: 700; font-size: 13px; color: #1e293b; margin-bottom: 4px;">Recordings & Screenshots Library</div>
+      <div style="font-size: 11px; color: #64748b; margin-bottom: 12px;">Access all saved videos, annotations, and snapshots.</div>
+      <button class="btn-primary" id="btnLaunchLibrary">
+        Open Library in Tab
+      </button>
+    </div>
+  </div>
+
+  <!-- Notice Banner for Chrome restricted pages -->
+  <div class="notice" id="noticeMsg"></div>
+
+  <!-- Footer Quick Links -->
+  <div class="footer-tools">
+    <button class="tool-link" id="btnFooterStudio">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect width="20" height="14" x="2" y="3" rx="2"/></svg>
+      <span>Open Studio</span>
+    </button>
+    <button class="tool-link" id="btnFooterLibrary">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.93a2 2 0 0 1-1.66-.9l-.82-1.2A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2Z"/></svg>
+      <span>Library</span>
+    </button>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
