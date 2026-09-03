@@ -306,51 +306,98 @@ async function initFullPageCapture() {
   const viewH = window.innerHeight;
   const viewW = window.innerWidth;
 
-  if (totalH <= viewH) {
-    if (textEl) textEl.textContent = '📸 Capturing full page... 100%';
-    chrome.runtime.sendMessage({ action: 'CAPTURE_VISIBLE_TAB_RAW' }, (res) => {
-      hud.remove();
-      if (res && res.dataUrl) {
-        chrome.runtime.sendMessage({ action: 'OPEN_CROPPED_SCREENSHOT', dataUrl: res.dataUrl });
-      }
-    });
-    return;
+  // chrome.tabs.captureVisibleTab is hard-limited to ~2 calls/second; any faster
+  // and calls start silently failing, which used to leave blank gaps in the stitched image.
+  const CAPTURE_QUOTA_DELAY_MS = 550;
+
+  async function hideHudForCapture() {
+    hud.style.visibility = 'hidden';
+    // wait for the hidden state to actually paint before we snapshot the tab
+    await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+  }
+  function showHud() {
+    hud.style.visibility = 'visible';
   }
 
-  const captures = [];
-  let currentY = 0;
-
-  while (currentY < totalH) {
-    const scrollTargetY = Math.min(currentY, totalH - viewH);
-    window.scrollTo(0, scrollTargetY);
-
-    const pct = Math.min(99, Math.round(((scrollTargetY + viewH) / totalH) * 100));
-    if (textEl) textEl.textContent = `📸 Capturing full page (top to bottom)... ${pct}%`;
-
-    await new Promise(r => setTimeout(r, 220));
-
-    const sliceRes = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({ action: 'CAPTURE_VISIBLE_TAB_RAW' }, (res) => {
-        resolve(res && res.ok ? res.dataUrl : null);
-      });
-    });
-
-    if (sliceRes) {
-      captures.push({
-        dataUrl: sliceRes,
-        destY: scrollTargetY
-      });
+  async function showErrorAndRemoveHud(message) {
+    console.error('[Full Page Capture]', message);
+    if (textEl) {
+      textEl.textContent = `⚠️ ${message}`;
+      await new Promise(r => setTimeout(r, 2500));
     }
-
-    if (scrollTargetY + viewH >= totalH) break;
-    currentY += viewH;
+    hud.remove();
   }
 
-  if (textEl) textEl.textContent = '⚡ Stitching high-res screenshot...';
-
-  window.scrollTo(origScrollX, origScrollY);
+  async function captureSliceWithRetry(maxRetries = 3) {
+    let lastError = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      const res = await new Promise((resolve) => {
+        chrome.runtime.sendMessage({ action: 'CAPTURE_VISIBLE_TAB_RAW' }, (r) => {
+          if (chrome.runtime.lastError) {
+            resolve({ ok: false, error: chrome.runtime.lastError.message });
+            return;
+          }
+          resolve(r);
+        });
+      });
+      if (res && res.ok && res.dataUrl) return { dataUrl: res.dataUrl };
+      lastError = (res && res.error) || 'Unknown capture error';
+      console.warn(`[Full Page Capture] slice attempt ${attempt + 1}/${maxRetries + 1} failed:`, lastError);
+      // most likely hit captureVisibleTab's per-second quota - back off and retry
+      await new Promise(r => setTimeout(r, CAPTURE_QUOTA_DELAY_MS));
+    }
+    return { dataUrl: null, error: lastError };
+  }
 
   try {
+    if (totalH <= viewH) {
+      if (textEl) textEl.textContent = '📸 Capturing full page... 100%';
+      await hideHudForCapture();
+      const { dataUrl, error } = await captureSliceWithRetry();
+      showHud();
+      if (!dataUrl) {
+        await showErrorAndRemoveHud(error || 'Could not capture the page.');
+        return;
+      }
+      hud.remove();
+      chrome.runtime.sendMessage({ action: 'OPEN_CROPPED_SCREENSHOT', dataUrl });
+      return;
+    }
+
+    const captures = [];
+    let currentY = 0;
+    let lastSliceError = null;
+
+    while (currentY < totalH) {
+      const scrollTargetY = Math.min(currentY, totalH - viewH);
+      window.scrollTo(0, scrollTargetY);
+
+      const pct = Math.min(99, Math.round(((scrollTargetY + viewH) / totalH) * 100));
+      if (textEl) textEl.textContent = `📸 Capturing full page (top to bottom)... ${pct}%`;
+
+      await new Promise(r => setTimeout(r, CAPTURE_QUOTA_DELAY_MS));
+
+      await hideHudForCapture();
+      const { dataUrl: sliceDataUrl, error: sliceError } = await captureSliceWithRetry();
+      showHud();
+
+      if (sliceDataUrl) {
+        captures.push({
+          dataUrl: sliceDataUrl,
+          destY: scrollTargetY
+        });
+      } else {
+        lastSliceError = sliceError;
+      }
+
+      if (scrollTargetY + viewH >= totalH) break;
+      currentY += viewH;
+    }
+
+    if (textEl) textEl.textContent = '⚡ Stitching high-res screenshot...';
+
+    window.scrollTo(origScrollX, origScrollY);
+
     const images = await Promise.all(captures.map(c => new Promise(res => {
       const img = new Image();
       img.onload = () => res({ img, destY: c.destY });
@@ -360,7 +407,7 @@ async function initFullPageCapture() {
 
     const validImages = images.filter(Boolean);
     if (validImages.length === 0) {
-      hud.remove();
+      await showErrorAndRemoveHud(lastSliceError || 'Could not capture any part of the page.');
       return;
     }
 
@@ -384,7 +431,6 @@ async function initFullPageCapture() {
       dataUrl: fullPageDataUrl
     });
   } catch (err) {
-    console.error('Full page capture error:', err);
-    hud.remove();
+    await showErrorAndRemoveHud(err && err.message ? err.message : String(err));
   }
 }

@@ -44,6 +44,29 @@ function showNotice(msg) {
   n.style.display = 'block';
 }
 
+// Tabs that were already open before the extension was installed/reloaded never got
+// content.js injected, so a plain sendMessage to them fails silently. Inject it on
+// demand and retry instead of falling back to a blank Studio editor.
+function sendToContentScript(tabId, message, callback) {
+  chrome.tabs.sendMessage(tabId, message, (response) => {
+    if (!chrome.runtime.lastError) {
+      callback(response);
+      return;
+    }
+    chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] }, () => {
+      if (chrome.runtime.lastError) {
+        callback(null);
+        return;
+      }
+      chrome.scripting.insertCSS({ target: { tabId }, files: ['content.css'] }, () => {
+        chrome.tabs.sendMessage(tabId, message, (response2) => {
+          callback(chrome.runtime.lastError ? null : response2);
+        });
+      });
+    });
+  });
+}
+
 // 1. Start Recording Button
 document.getElementById('btnStartRecording').addEventListener('click', () => {
   const mic = document.getElementById('micToggle').checked;
@@ -75,8 +98,8 @@ document.getElementById('btnCaptureFullPage').addEventListener('click', () => {
         }, 1200);
         return;
       }
-      chrome.tabs.sendMessage(tabs[0].id, { action: 'START_FULL_PAGE_CAPTURE' }, (response) => {
-        if (chrome.runtime.lastError) {
+      sendToContentScript(tabs[0].id, { action: 'START_FULL_PAGE_CAPTURE' }, (response) => {
+        if (!response) {
           chrome.runtime.sendMessage({ action: 'OPEN_STUDIO', view: 'screenshot' });
         }
         window.close();
@@ -103,9 +126,9 @@ document.getElementById('btnCaptureSelected').addEventListener('click', () => {
         }, 1200);
         return;
       }
-      chrome.tabs.sendMessage(tabs[0].id, { action: 'START_REGION_SELECT' }, (response) => {
-        if (chrome.runtime.lastError) {
-          // If content script was not injected on an old tab, open studio
+      sendToContentScript(tabs[0].id, { action: 'START_REGION_SELECT' }, (response) => {
+        if (!response) {
+          // Injection also failed (e.g. a restricted page) - fall back to Studio
           chrome.runtime.sendMessage({ action: 'OPEN_STUDIO', view: 'screenshot' });
         }
         window.close();
