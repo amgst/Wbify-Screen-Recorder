@@ -15,10 +15,10 @@
     .nav-btn.active { background: #ffffff; color: #2563eb; box-shadow: 0 1px 3px rgba(0,0,0,0.06); }
 
     /* Main Container */
-    .container { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px; max-width: 1200px; margin: 0 auto; width: 100%; }
+    .container { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-start; padding: 16px 24px; width: 100%; max-width: 100%; }
 
     /* Card */
-    .card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 20px; padding: 28px; box-shadow: 0 4px 20px rgba(0,0,0,0.04); width: 100%; max-width: 720px; }
+    .card { background: #ffffff; border: 1px solid #e2e8f0; border-radius: 20px; padding: 28px; box-shadow: 0 4px 20px rgba(0,0,0,0.04); width: 100%; max-width: 720px; margin: 20px auto; }
     .card-title { font-size: 18px; font-weight: 800; color: #0f172a; margin-bottom: 6px; }
     .card-desc { font-size: 13px; color: #64748b; margin-bottom: 20px; }
 
@@ -31,7 +31,7 @@
 
     /* Live Studio View */
     .live-studio { width: 100%; display: none; flex-direction: column; align-items: center; }
-    .video-preview-box { width: 100%; max-width: 960px; height: 520px; background: #0f172a; border-radius: 16px; overflow: hidden; position: relative; border: 1px solid #334155; }
+    .video-preview-box { width: 100%; max-width: 1400px; height: 580px; background: #0f172a; border-radius: 16px; overflow: hidden; position: relative; border: 1px solid #334155; }
     .video-preview-box video { width: 100%; height: 100%; object-fit: contain; }
     .live-badge { position: absolute; top: 16px; left: 16px; background: rgba(239, 68, 68, 0.9); color: white; padding: 4px 10px; border-radius: 9999px; font-weight: 800; font-size: 11px; display: flex; align-items: center; gap: 6px; }
     .live-timer { position: absolute; top: 16px; right: 16px; background: rgba(15, 23, 42, 0.85); color: white; font-family: monospace; font-weight: bold; padding: 4px 12px; border-radius: 8px; font-size: 13px; }
@@ -39,23 +39,36 @@
 
     /* Screenshot Editor Canvas */
     .editor-container { width: 100%; display: none; flex-direction: column; }
-    .editor-toolbar { display: flex; align-items: center; justify-content: space-between; background: #ffffff; padding: 10px 16px; border: 1px solid #e2e8f0; border-radius: 16px; margin-bottom: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.03); }
-    .tool-group { display: flex; align-items: center; gap: 6px; }
-    .tool-btn { padding: 8px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; font-size: 12px; font-weight: 700; color: #475569; cursor: pointer; }
+    .editor-toolbar { display: flex; align-items: center; justify-content: space-between; background: #ffffff; padding: 10px 16px; border: 1px solid #e2e8f0; border-radius: 16px; margin-bottom: 12px; box-shadow: 0 2px 6px rgba(0,0,0,0.03); flex-wrap: wrap; gap: 10px; }
+    .tool-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .tool-btn { padding: 8px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; font-size: 12px; font-weight: 700; color: #475569; cursor: pointer; transition: all 0.15s; }
+    .tool-btn:hover { background: #f1f5f9; color: #0f172a; }
     .tool-btn.active { background: #2563eb; color: white; border-color: #2563eb; }
-    .canvas-wrap { background: #e2e8f0; padding: 20px; border-radius: 16px; overflow: auto; display: flex; align-items: center; justify-content: center; min-height: 480px; }
-    .canvas-wrap canvas { background: white; box-shadow: 0 10px 30px rgba(0,0,0,0.15); border-radius: 8px; }
+    
+    .canvas-wrap { background: #e2e8f0; padding: 20px; border-radius: 16px; overflow: auto; display: flex; min-height: 520px; max-height: calc(100vh - 140px); width: 100%; }
+    .canvas-wrap canvas { background: white; box-shadow: 0 10px 30px rgba(0,0,0,0.15); border-radius: 8px; margin: auto; display: block; transition: max-width 0.2s ease, width 0.2s ease; }
+    .canvas-wrap.fit-mode canvas { max-width: 100%; height: auto !important; object-fit: contain; }
+    .canvas-wrap.actual-mode canvas { max-width: none; }
 
     /* Library Grid */
-    .library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; width: 100%; margin-top: 16px; }
+    .library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; width: 100%; margin-top: 16px; }
     .lib-card { background: white; border: 1px solid #e2e8f0; border-radius: 14px; overflow: hidden; box-shadow: 0 2px 6px rgba(0,0,0,0.03); }
-    .lib-thumb { width: 100%; height: 130px; background: #0f172a; object-fit: cover; }
+    .lib-thumb { width: 100%; height: 140px; background: #0f172a; object-fit: cover; }
     .lib-body { padding: 12px; }
     .lib-title { font-weight: 700; font-size: 13px; color: #0f172a; margin-bottom: 4px; }
     .lib-meta { font-size: 11px; color: #64748b; margin-bottom: 10px; }
     .lib-actions { display: flex; gap: 6px; }
 
     .rec-pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: white; animation: pulse 1.2s infinite; }
+
+    /* Countdown overlay */
+    .countdown-overlay { display: none; position: absolute; inset: 0; background: rgba(15, 23, 42, 0.55); align-items: center; justify-content: center; font-size: 96px; font-weight: 800; color: white; z-index: 5; }
+
+    /* Preview / Library Modal */
+    .modal-backdrop { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.6); align-items: center; justify-content: center; z-index: 1000; padding: 24px; }
+    .modal-box { background: #0f172a; border-radius: 16px; padding: 16px; max-width: 1200px; width: 100%; }
+    .modal-box video, .modal-box img { width: 100%; max-height: 80vh; border-radius: 10px; display: block; background: black; object-fit: contain; }
+    .modal-close-row { display: flex; justify-content: flex-end; margin-top: 12px; }
   </style>
 </head>
 <body>
@@ -70,6 +83,7 @@
       <button class="nav-btn active" id="navStudio">Recorder Studio</button>
       <button class="nav-btn" id="navScreenshot">Screenshot Editor</button>
       <button class="nav-btn" id="navLibrary">Saved Library</button>
+      <button class="nav-btn" id="navSettings">⚙️ Settings & Storage</button>
     </div>
   </div>
 
@@ -107,6 +121,7 @@
           <span>RECORDING ACTIVE</span>
         </div>
         <div class="live-timer" id="liveTimerText">00:00</div>
+        <div class="countdown-overlay" id="countdownOverlay"></div>
       </div>
 
       <div class="controls-bar">
@@ -139,16 +154,30 @@
     <div class="editor-container" id="editorView">
       <div class="editor-toolbar">
         <div class="tool-group">
+          <button class="tool-btn" data-tool="select">👆 Select</button>
           <button class="tool-btn active" data-tool="arrow">↗ Arrow</button>
           <button class="tool-btn" data-tool="rect">▢ Box</button>
           <button class="tool-btn" data-tool="circle">◯ Circle</button>
+          <button class="tool-btn" data-tool="line">― Line</button>
           <button class="tool-btn" data-tool="pen">✏ Pen</button>
+          <button class="tool-btn" data-tool="highlighter">🖌 Highlight</button>
+          <button class="tool-btn" data-tool="step">① Step</button>
           <button class="tool-btn" data-tool="text">T Text</button>
           <button class="tool-btn" data-tool="blur">▧ Blur</button>
+          <button class="tool-btn" data-tool="emoji">✅ Emoji</button>
+          <button class="tool-btn" id="btnCropMode" style="color: #2563eb; font-weight: 800;">✂ Crop</button>
         </div>
 
         <div class="tool-group">
-          <input type="color" id="markupColorPicker" value="#ef4444" style="width: 32px; height: 32px; border: none; border-radius: 8px; cursor: pointer;">
+          <select id="strokeWidthSelect" style="padding: 7px 10px; border-radius: 10px; border: 1px solid #e2e8f0; font-size: 12px; font-weight: 700; color: #475569; background: #f8fafc; cursor: pointer;" title="Line Thickness">
+            <option value="2">Thin (2px)</option>
+            <option value="4" selected>Medium (4px)</option>
+            <option value="8">Thick (8px)</option>
+            <option value="14">Extra Thick (14px)</option>
+          </select>
+          <input type="color" id="markupColorPicker" value="#ef4444" style="width: 32px; height: 32px; border: none; border-radius: 8px; cursor: pointer;" title="Color Picker">
+          <button class="tool-btn active" id="btnToggleZoom" title="Toggle between Fit to Screen and 1:1 Actual Size">🔍 Fit Screen</button>
+          <button class="tool-btn" id="btnDeleteSelected" style="color: #ef4444;" title="Delete selected object (or press Delete key)">🗑 Delete</button>
           <button class="tool-btn" id="btnUndo">Undo</button>
           <button class="tool-btn" id="btnClearCanvas">Clear</button>
           <button class="btn-secondary" id="btnCopyShot">Copy Image</button>
@@ -156,7 +185,29 @@
         </div>
       </div>
 
-      <div class="canvas-wrap">
+      <!-- Emoji Palette Sub-bar (shows when Emoji tool is selected) -->
+      <div id="emojiPaletteBar" style="display: none; background: #ffffff; padding: 8px 14px; border: 1px solid #e2e8f0; border-radius: 12px; margin-bottom: 10px; gap: 8px; align-items: center;">
+        <span style="font-size: 12px; font-weight: 700; color: #64748b;">Pick Sticker:</span>
+        <button class="emoji-opt-btn" data-emoji="✅" style="font-size: 18px; background: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 4px 8px; cursor: pointer;">✅</button>
+        <button class="emoji-opt-btn" data-emoji="❌" style="font-size: 18px; background: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 4px 8px; cursor: pointer;">❌</button>
+        <button class="emoji-opt-btn" data-emoji="⭐" style="font-size: 18px; background: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 4px 8px; cursor: pointer;">⭐</button>
+        <button class="emoji-opt-btn" data-emoji="⚠️" style="font-size: 18px; background: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 4px 8px; cursor: pointer;">⚠️</button>
+        <button class="emoji-opt-btn" data-emoji="❓" style="font-size: 18px; background: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 4px 8px; cursor: pointer;">❓</button>
+        <button class="emoji-opt-btn" data-emoji="❤️" style="font-size: 18px; background: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 4px 8px; cursor: pointer;">❤️</button>
+        <button class="emoji-opt-btn" data-emoji="💡" style="font-size: 18px; background: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 4px 8px; cursor: pointer;">💡</button>
+        <button class="emoji-opt-btn" data-emoji="🔥" style="font-size: 18px; background: none; border: 1px solid #e2e8f0; border-radius: 8px; padding: 4px 8px; cursor: pointer;">🔥</button>
+      </div>
+
+      <!-- Crop Action Bar (shows when Crop mode is active) -->
+      <div id="cropActionBar" style="display: none; background: #1e293b; color: white; padding: 10px 16px; border-radius: 12px; margin-bottom: 10px; gap: 12px; align-items: center; justify-content: space-between;">
+        <span style="font-size: 13px; font-weight: 700;">📐 Drag bounding box to select crop area</span>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn-blue" id="btnApplyCrop" style="padding: 6px 14px; font-size: 12px;">Apply Crop</button>
+          <button class="btn-secondary" id="btnCancelCrop" style="padding: 6px 14px; font-size: 12px; background: #334155; color: white; border-color: #475569;">Cancel</button>
+        </div>
+      </div>
+
+      <div class="canvas-wrap fit-mode">
         <canvas id="markupCanvas"></canvas>
       </div>
     </div>
@@ -164,10 +215,94 @@
     <!-- View 5: Library -->
     <div id="libraryContainer" style="display: none; width: 100%;">
       <h2 class="card-title">Your Recordings & Captures</h2>
-      <p class="card-desc">Saved items in this browser session.</p>
+      <p class="card-desc">Saved items in local browser storage.</p>
       <div class="library-grid" id="libGrid"></div>
     </div>
 
+    <!-- View 6: Settings & Storage -->
+    <div id="settingsContainer" style="display: none; width: 100%; max-width: 900px; margin: 0 auto;">
+      <h2 class="card-title">Settings & Storage Management</h2>
+      <p class="card-desc">Configure save location preferences, manage storage space, and setup capacity alerts.</p>
+
+      <!-- Storage Gauge Card -->
+      <div style="background: white; border: 1px solid #e2e8f0; border-radius: 16px; padding: 20px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.03);">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+          <strong style="font-size: 14px; color: #0f172a;">Storage Space Consumed:</strong>
+          <span id="storageUsageText" style="font-size: 13px; font-weight: 700; color: #2563eb;">Calculating...</span>
+        </div>
+        <div style="background: #e2e8f0; height: 14px; border-radius: 9999px; overflow: hidden; margin-bottom: 12px;">
+          <div id="storageUsageBar" style="background: #2563eb; height: 100%; width: 0%; transition: width 0.3s ease;"></div>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; font-size: 12px; color: #64748b;">
+          <span>Includes stored screenshots and recorded videos</span>
+          <button class="btn-secondary" id="btnRefreshStorage" style="padding: 4px 10px; font-size: 11px;">🔄 Refresh Usage</button>
+        </div>
+      </div>
+
+      <!-- Settings Form Card -->
+      <div style="background: white; border: 1px solid #e2e8f0; border-radius: 16px; padding: 24px; box-shadow: 0 2px 8px rgba(0,0,0,0.03); display: flex; flex-direction: column; gap: 20px;">
+        
+        <!-- Setting 1: Save Location Mode -->
+        <div>
+          <label style="display: block; font-weight: 700; font-size: 14px; color: #0f172a; margin-bottom: 6px;">File Download Save Location:</label>
+          <p style="font-size: 12px; color: #64748b; margin-bottom: 10px;">Choose whether browser prompts for save directory or auto-saves.</p>
+          <div style="display: flex; flex-direction: column; gap: 10px; font-size: 13px; color: #334155;">
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+              <input type="radio" name="saveLocationMode" value="prompt" checked style="width: 16px; height: 16px;">
+              <span><strong>Always ask where to save files</strong> (Opens OS file save dialog)</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+              <input type="radio" name="saveLocationMode" value="auto" style="width: 16px; height: 16px;">
+              <span><strong>Save automatically to default Downloads folder</strong></span>
+            </label>
+          </div>
+        </div>
+
+        <hr style="border: none; border-top: 1px solid #f1f5f9;">
+
+        <!-- Setting 2: Storage Limit -->
+        <div>
+          <label style="display: block; font-weight: 700; font-size: 14px; color: #0f172a; margin-bottom: 6px;">Storage Limit Allocation:</label>
+          <p style="font-size: 12px; color: #64748b; margin-bottom: 10px;">Specify maximum local storage capacity allowed before triggering alerts.</p>
+          <select id="selectStorageLimit" style="padding: 10px 14px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 13px; font-weight: 700; color: #0f172a; width: 100%; max-width: 320px; background: #f8fafc;">
+            <option value="250">250 MB</option>
+            <option value="500">500 MB</option>
+            <option value="1000" selected>1 GB (Default)</option>
+            <option value="2000">2 GB</option>
+            <option value="5000">5 GB</option>
+            <option value="0">Unlimited (No Limit)</option>
+          </select>
+        </div>
+
+        <hr style="border: none; border-top: 1px solid #f1f5f9;">
+
+        <!-- Setting 3: Notifications -->
+        <div>
+          <label style="display: block; font-weight: 700; font-size: 14px; color: #0f172a; margin-bottom: 6px;">Storage Quota Notifications:</label>
+          <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; color: #334155; cursor: pointer;">
+            <input type="checkbox" id="chkStorageNotify" checked style="width: 16px; height: 16px;">
+            <span>Send browser notifications when storage reaches 90% capacity</span>
+          </label>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
+          <span id="saveSettingsMsg" style="font-size: 12px; color: #16a34a; font-weight: 700; display: none; align-self: center;">✓ Settings Saved!</span>
+          <button class="btn-blue" id="btnSaveSettings">Save Settings</button>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Library Preview Modal -->
+  <div class="modal-backdrop" id="previewModal">
+    <div class="modal-box" id="previewModalBox">
+      <div id="previewModalContent"></div>
+      <div class="modal-close-row">
+        <button class="btn-secondary" id="btnClosePreview">Close</button>
+      </div>
+    </div>
   </div>
 
   <script src="studio.js"></script>

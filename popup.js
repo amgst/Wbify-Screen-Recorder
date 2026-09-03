@@ -63,6 +63,28 @@ document.getElementById('btnStartRecording').addEventListener('click', () => {
   window.close();
 });
 
+// 1. Full Page Capture (Top to Bottom - Auto Scroll)
+document.getElementById('btnCaptureFullPage').addEventListener('click', () => {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (tabs[0] && tabs[0].id) {
+      if (tabs[0].url && (tabs[0].url.startsWith('chrome://') || tabs[0].url.startsWith('edge://') || tabs[0].url.startsWith('about:'))) {
+        showNotice('Cannot capture browser system pages. Opening Studio instead...');
+        setTimeout(() => {
+          chrome.runtime.sendMessage({ action: 'OPEN_STUDIO', view: 'screenshot' });
+          window.close();
+        }, 1200);
+        return;
+      }
+      chrome.tabs.sendMessage(tabs[0].id, { action: 'START_FULL_PAGE_CAPTURE' }, (response) => {
+        if (chrome.runtime.lastError) {
+          chrome.runtime.sendMessage({ action: 'OPEN_STUDIO', view: 'screenshot' });
+        }
+        window.close();
+      });
+    }
+  });
+});
+
 // 2. Screenshot: Visible Part
 document.getElementById('btnCaptureVisible').addEventListener('click', () => {
   chrome.runtime.sendMessage({ action: 'CAPTURE_VISIBLE_TAB' });
@@ -86,8 +108,8 @@ document.getElementById('btnCaptureSelected').addEventListener('click', () => {
           // If content script was not injected on an old tab, open studio
           chrome.runtime.sendMessage({ action: 'OPEN_STUDIO', view: 'screenshot' });
         }
+        window.close();
       });
-      window.close();
     }
   });
 });

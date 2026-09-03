@@ -4,14 +4,14 @@
   "version": "1.2.0",
   "description": "Screen recorder, browser tab capture, webcam PIP, live markup annotations, and screenshot editor.",
   "permissions": [
-    "tabCapture",
     "activeTab",
     "storage",
     "unlimitedStorage",
     "scripting",
     "tabs",
     "notifications",
-    "contextMenus"
+    "contextMenus",
+    "downloads"
   ],
   "host_permissions": [
     "<all_urls>"

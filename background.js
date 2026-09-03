@@ -26,16 +26,41 @@ chrome.commands.onCommand.addListener((command) => {
   }
 });
 
+function addLibraryIndexEntry(entry) {
+  chrome.storage.local.get(['library_index'], (res) => {
+    const list = res.library_index || [];
+    list.unshift(entry);
+    chrome.storage.local.set({ library_index: list });
+  });
+}
+
 function captureVisibleTab() {
-  chrome.tabs.captureVisibleTab(null, { format: 'png' }, (dataUrl) => {
-    if (chrome.runtime.lastError || !dataUrl) {
-      openStudio('screenshot');
-      return;
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    const activeTab = (tabs && tabs[0]) ? tabs[0] : null;
+    const windowId = activeTab ? activeTab.windowId : undefined;
+    
+    const handleResult = (dataUrl) => {
+      if (chrome.runtime.lastError || !dataUrl) {
+        console.warn('captureVisibleTab warning:', chrome.runtime.lastError);
+        openStudio('screenshot');
+        return;
+      }
+      const id = 'shot_' + Date.now();
+      chrome.storage.local.set({ [id]: dataUrl, 'active_screenshot': dataUrl }, () => {
+        addLibraryIndexEntry({ id, type: 'screenshot', createdAt: Date.now() });
+        chrome.tabs.create({ url: chrome.runtime.getURL('studio.html?action=edit_screenshot&id=' + id) });
+      });
+    };
+
+    try {
+      if (windowId !== undefined && windowId !== null) {
+        chrome.tabs.captureVisibleTab(windowId, { format: 'png' }, handleResult);
+      } else {
+        chrome.tabs.captureVisibleTab({ format: 'png' }, handleResult);
+      }
+    } catch (e) {
+      chrome.tabs.captureVisibleTab({ format: 'png' }, handleResult);
     }
-    const id = 'shot_' + Date.now();
-    chrome.storage.local.set({ [id]: dataUrl, 'active_screenshot': dataUrl }, () => {
-      chrome.tabs.create({ url: chrome.runtime.getURL('studio.html?action=edit_screenshot&id=' + id) });
-    });
   });
 }
 
@@ -77,9 +102,36 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'OPEN_CROPPED_SCREENSHOT') {
     const id = 'shot_' + Date.now();
     chrome.storage.local.set({ [id]: request.dataUrl, 'active_screenshot': request.dataUrl }, () => {
+      addLibraryIndexEntry({ id, type: 'screenshot', createdAt: Date.now() });
       chrome.tabs.create({ url: chrome.runtime.getURL('studio.html?action=edit_screenshot&id=' + id) });
     });
     sendResponse({ ok: true });
+    return true;
+  }
+
+  if (request.action === 'CAPTURE_VISIBLE_TAB_RAW') {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const activeTab = (tabs && tabs[0]) ? tabs[0] : null;
+      const windowId = activeTab ? activeTab.windowId : undefined;
+
+      const handleResult = (dataUrl) => {
+        if (chrome.runtime.lastError || !dataUrl) {
+          sendResponse({ ok: false, error: chrome.runtime.lastError?.message });
+          return;
+        }
+        sendResponse({ ok: true, dataUrl });
+      };
+
+      try {
+        if (windowId !== undefined && windowId !== null) {
+          chrome.tabs.captureVisibleTab(windowId, { format: 'png' }, handleResult);
+        } else {
+          chrome.tabs.captureVisibleTab({ format: 'png' }, handleResult);
+        }
+      } catch (e) {
+        chrome.tabs.captureVisibleTab({ format: 'png' }, handleResult);
+      }
+    });
     return true;
   }
 });
