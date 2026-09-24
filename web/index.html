@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>wbify screen recorder</title>
+  <meta name="description" content="Homepage and support information for the wbify screen recorder Chrome extension.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%232563eb'/%3E%3Ccircle cx='32' cy='32' r='18' fill='white'/%3E%3Ccircle cx='32' cy='32' r='11' fill='%23ef4444'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f8fafc;
+      --card: #ffffff;
+      --text: #0f172a;
+      --muted: #475569;
+      --line: #dbe3ef;
+      --blue: #2563eb;
+      --red: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .wrap {
+      width: min(1120px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+    header {
+      padding: 28px 0;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 800;
+      font-size: 20px;
+    }
+    .logo {
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      background: var(--blue);
+      display: grid;
+      place-items: center;
+      box-shadow: 0 12px 28px rgba(37, 99, 235, 0.24);
+    }
+    .logo span {
+      width: 22px;
+      height: 22px;
+      border-radius: 50%;
+      background: #fff;
+      display: grid;
+      place-items: center;
+    }
+    .logo span::after {
+      content: "";
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--red);
+    }
+    nav {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    nav a, .button {
+      color: var(--blue);
+      text-decoration: none;
+      font-weight: 700;
+    }
+    .hero {
+      padding: 72px 0 46px;
+      display: grid;
+      grid-template-columns: 1fr 420px;
+      gap: 54px;
+      align-items: center;
+    }
+    h1 {
+      margin: 0;
+      font-size: clamp(42px, 7vw, 72px);
+      line-height: 1.02;
+      letter-spacing: 0;
+    }
+    .lead {
+      margin: 24px 0 0;
+      color: var(--muted);
+      font-size: 21px;
+      max-width: 700px;
+    }
+    .mock {
+      background: #0f172a;
+      border-radius: 20px;
+      padding: 18px;
+      box-shadow: 0 28px 70px rgba(15, 23, 42, 0.24);
+    }
+    .screen {
+      background: #eff6ff;
+      border-radius: 14px;
+      height: 260px;
+      position: relative;
+      overflow: hidden;
+      border: 1px solid #bfdbfe;
+    }
+    .screen::before {
+      content: "";
+      position: absolute;
+      inset: 48px 42px;
+      border: 4px solid var(--blue);
+      border-radius: 12px;
+    }
+    .badge {
+      position: absolute;
+      top: 18px;
+      left: 18px;
+      background: var(--red);
+      color: #fff;
+      padding: 7px 12px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 800;
+    }
+    section {
+      padding: 38px 0;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 18px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 24px;
+      box-shadow: 0 12px 28px rgba(15, 23, 42, 0.06);
+    }
+    h2 {
+      margin: 0 0 14px;
+      font-size: 30px;
+      line-height: 1.2;
+    }
+    h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+    }
+    p {
+      margin: 0 0 12px;
+      color: var(--muted);
+    }
+    ul {
+      margin: 12px 0 0;
+      padding-left: 20px;
+      color: var(--muted);
+    }
+    footer {
+      border-top: 1px solid var(--line);
+      margin-top: 34px;
+      padding: 26px 0 40px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    @media (max-width: 860px) {
+      header, .hero { grid-template-columns: 1fr; }
+      header { align-items: flex-start; flex-direction: column; }
+      .hero { padding-top: 36px; }
+      .grid { grid-template-columns: 1fr; }
+      .mock { max-width: 480px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="wrap">
+    <div class="brand">
+      <div class="logo" aria-hidden="true"><span></span></div>
+      <span>wbify screen recorder</span>
+    </div>
+    <nav aria-label="Page navigation">
+      <a href="#features">Features</a>
+      <a href="#support">Support</a>
+      <a href="#privacy">Privacy</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="wrap hero">
+      <div>
+        <h1>Record, capture, annotate, and save locally.</h1>
+        <p class="lead">wbify screen recorder is a Chrome extension for creating screen recordings, tab recordings, camera videos, screenshots, and annotated visual notes.</p>
+      </div>
+      <div class="mock" aria-hidden="true">
+        <div class="screen">
+          <div class="badge">RECORDING</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="wrap" id="features">
+      <h2>Features</h2>
+      <div class="grid">
+        <article class="card">
+          <h3>Screen and tab recording</h3>
+          <p>Record your screen, browser tab, or camera with optional microphone, webcam overlay, and system or tab audio.</p>
+        </article>
+        <article class="card">
+          <h3>Screenshot capture</h3>
+          <p>Capture the visible page, a selected area, or a full webpage using the built-in screenshot tools.</p>
+        </article>
+        <article class="card">
+          <h3>Markup and editing</h3>
+          <p>Add arrows, boxes, text, highlights, blur, stickers, and crops before saving or downloading your files.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap" id="support">
+      <div class="card">
+        <h2>Support</h2>
+        <p>For help, bug reports, or feature requests, contact the publisher from the Chrome Web Store listing account or email the publisher address shown on the listing.</p>
+        <p>Please include your Chrome version, what you were trying to record or capture, and a short description of what happened.</p>
+      </div>
+    </section>
+
+    <section class="wrap" id="privacy">
+      <div class="card">
+        <h2>Privacy</h2>
+        <p>wbify screen recorder is designed for local recording and screenshot workflows. Recordings and screenshots are stored locally in your browser or downloaded to your computer when you choose to save them.</p>
+        <ul>
+          <li>The extension does not need an account to record or capture.</li>
+          <li>The extension does not upload recordings or screenshots to a remote server.</li>
+          <li>Screen, tab, camera, and microphone access are used only after you choose a capture or recording action.</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <span>wbify screen recorder for Chrome</span>
+  </footer>
+</body>
+</html>
