@@ -9,6 +9,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
+// Hands a finished screenshot to the background worker, which stores it and
+// opens the editor. Reports failure (e.g. payload too large) instead of
+// silently doing nothing.
+function sendCroppedScreenshot(dataUrl, onError) {
+  const fail = (message) => {
+    if (onError) onError(message);
+    else showPageToast('⚠️ Could not open screenshot: ' + message);
+  };
+  try {
+    chrome.runtime.sendMessage({ action: 'OPEN_CROPPED_SCREENSHOT', dataUrl }, (response) => {
+      const err = chrome.runtime.lastError;
+      if (err) fail(err.message);
+      else if (response && !response.ok) fail(response.error || 'Unknown error');
+    });
+  } catch (e) {
+    fail(e && e.message ? e.message : 'Extension was reloaded - refresh the page and try again');
+  }
+}
+
+function showPageToast(msg) {
+  const toast = document.createElement('div');
+  toast.id = 'awesome-toast-notice';
+  toast.textContent = msg;
+  document.body.appendChild(toast);
+  setTimeout(() => toast.remove(), 2600);
+}
+
 function initRegionSelector() {
   if (document.getElementById('awesome-region-overlay')) return;
 
@@ -199,24 +226,33 @@ function initRegionSelector() {
     }
   }
 
-  function showToast(msg) {
-    const toast = document.createElement('div');
-    toast.id = 'awesome-toast-notice';
-    toast.textContent = msg;
-    document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 2600);
-  }
+  const showToast = showPageToast;
 
-  function processRegionCapture(openInStudio = true) {
-    const captureRect = { ...rect };
+  async function processRegionCapture(openInStudio = true) {
+    // The box can be dragged/resized partly off-screen; crop only the part
+    // inside the viewport so the region doesn't shift.
+    const vLeft = Math.max(0, rect.left);
+    const vTop = Math.max(0, rect.top);
+    const captureRect = {
+      left: vLeft,
+      top: vTop,
+      width: Math.min(window.innerWidth, rect.left + rect.width) - vLeft,
+      height: Math.min(window.innerHeight, rect.top + rect.height) - vTop
+    };
     cleanup();
 
     if (captureRect.width < 15 || captureRect.height < 15) return;
 
+    await ensurePageImagesAndFontsLoaded(document, 1200);
+
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         chrome.runtime.sendMessage({ action: 'CAPTURE_VISIBLE_TAB_RAW' }, (response) => {
-          if (chrome.runtime.lastError || !response || !response.ok) return;
+          const err = chrome.runtime.lastError;
+          if (err || !response || !response.ok) {
+            showToast('⚠️ Capture failed: ' + (err?.message || response?.error || 'Unable to capture tab surface'));
+            return;
+          }
 
           const img = new Image();
           img.onload = () => {
@@ -236,20 +272,14 @@ function initRegionSelector() {
             const croppedDataUrl = cropCanvas.toDataURL('image/png');
 
             if (openInStudio) {
-              chrome.runtime.sendMessage({
-                action: 'OPEN_CROPPED_SCREENSHOT',
-                dataUrl: croppedDataUrl
-              });
+              sendCroppedScreenshot(croppedDataUrl);
             } else {
               cropCanvas.toBlob(async (blob) => {
                 try {
                   await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
                   showToast('✓ Screenshot copied to clipboard!');
                 } catch (err) {
-                  chrome.runtime.sendMessage({
-                    action: 'OPEN_CROPPED_SCREENSHOT',
-                    dataUrl: croppedDataUrl
-                  });
+                  sendCroppedScreenshot(croppedDataUrl);
                 }
               });
             }
@@ -284,6 +314,66 @@ function initRegionSelector() {
   window.addEventListener('keydown', onKeyDown);
 }
 
+async function ensurePageImagesAndFontsLoaded(scope = document, maxTimeoutMs = 2500) {
+  if (document.readyState === 'loading') {
+    await new Promise(resolve => {
+      window.addEventListener('DOMContentLoaded', resolve, { once: true });
+      setTimeout(resolve, 800);
+    });
+  }
+
+  if (document.fonts && document.fonts.ready) {
+    try {
+      await Promise.race([
+        document.fonts.ready,
+        new Promise(r => setTimeout(r, 600))
+      ]);
+    } catch (e) {}
+  }
+
+  const images = Array.from(scope.querySelectorAll('img'));
+  const pendingPromises = [];
+
+  images.forEach(img => {
+    if (img.getAttribute('loading') === 'lazy') {
+      img.setAttribute('loading', 'eager');
+    }
+
+    const lazySrc = img.getAttribute('data-src') || img.getAttribute('data-lazy-src') || img.getAttribute('data-original');
+    if (lazySrc && (!img.src || img.src.includes('data:image/svg') || img.src.includes('blank') || img.naturalWidth === 0)) {
+      img.src = lazySrc;
+    }
+
+    const lazySrcset = img.getAttribute('data-srcset');
+    if (lazySrcset && !img.srcset) {
+      img.srcset = lazySrcset;
+    }
+
+    if (!img.complete || img.naturalWidth === 0) {
+      pendingPromises.push(new Promise(resolve => {
+        if (typeof img.decode === 'function') {
+          img.decode().then(resolve).catch(() => {
+            img.addEventListener('load', resolve, { once: true });
+            img.addEventListener('error', resolve, { once: true });
+            setTimeout(resolve, maxTimeoutMs);
+          });
+        } else {
+          img.addEventListener('load', resolve, { once: true });
+          img.addEventListener('error', resolve, { once: true });
+          setTimeout(resolve, maxTimeoutMs);
+        }
+      }));
+    }
+  });
+
+  if (pendingPromises.length > 0) {
+    await Promise.race([
+      Promise.all(pendingPromises),
+      new Promise(r => setTimeout(r, maxTimeoutMs))
+    ]);
+  }
+}
+
 async function initFullPageCapture() {
   if (document.getElementById('awesome-fullpage-hud')) return;
 
@@ -301,18 +391,73 @@ async function initFullPageCapture() {
 
   const origScrollX = window.scrollX;
   const origScrollY = window.scrollY;
+  const origHtmlOverflow = document.documentElement.style.overflow;
+  const origBodyOverflow = document.body.style.overflow;
 
-  const totalH = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
-  const viewH = window.innerHeight;
-  const viewW = window.innerWidth;
+  // Temporarily hide scrollbars to avoid capturing scrollbar tracks in screenshots
+  document.documentElement.style.overflow = 'hidden';
+  document.body.style.overflow = 'hidden';
 
-  // chrome.tabs.captureVisibleTab is hard-limited to ~2 calls/second; any faster
-  // and calls start silently failing, which used to leave blank gaps in the stitched image.
+  // Handle position: fixed / position: sticky elements to prevent repeating headers/footers
+  const fixedElements = [];
+  try {
+    const allEls = document.querySelectorAll('*');
+    allEls.forEach(el => {
+      if (el === hud || el.contains(hud)) return;
+      const style = window.getComputedStyle(el);
+      if (style.position === 'fixed' || style.position === 'sticky') {
+        const rect = el.getBoundingClientRect();
+        fixedElements.push({
+          el,
+          origVisibility: el.style.visibility,
+          isTopHeader: rect.top <= 120,
+          isBottomFooter: rect.bottom >= (window.innerHeight - 120)
+        });
+      }
+    });
+  } catch (e) {
+    console.warn('[Full Page Capture] Error detecting fixed elements', e);
+  }
+
+  function setFixedElementsVisibility(scrollTargetY, maxScrollY) {
+    fixedElements.forEach(item => {
+      if (scrollTargetY === 0) {
+        // Top slice: show top headers, hide bottom footers if page is long
+        if (item.isBottomFooter && maxScrollY > 0) {
+          item.el.style.visibility = 'hidden';
+        } else {
+          item.el.style.visibility = item.origVisibility;
+        }
+      } else if (scrollTargetY >= maxScrollY) {
+        // Bottom slice: hide top headers, show bottom footers
+        if (item.isTopHeader) {
+          item.el.style.visibility = 'hidden';
+        } else {
+          item.el.style.visibility = item.origVisibility;
+        }
+      } else {
+        // Middle slices: hide both top headers and bottom footers to prevent repetition
+        item.el.style.visibility = 'hidden';
+      }
+    });
+  }
+
+  function restoreFixedElements() {
+    fixedElements.forEach(item => {
+      item.el.style.visibility = item.origVisibility;
+    });
+  }
+
   const CAPTURE_QUOTA_DELAY_MS = 550;
+
+  // Pages with `scroll-behavior: smooth` would animate a plain scrollTo and the
+  // capture would fire mid-scroll, so force an immediate jump.
+  function scrollToInstant(x, y) {
+    window.scrollTo({ left: x, top: y, behavior: 'instant' });
+  }
 
   async function hideHudForCapture() {
     hud.style.visibility = 'hidden';
-    // wait for the hidden state to actually paint before we snapshot the tab
     await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
   }
   function showHud() {
@@ -325,6 +470,10 @@ async function initFullPageCapture() {
       textEl.textContent = `⚠️ ${message}`;
       await new Promise(r => setTimeout(r, 2500));
     }
+    restoreFixedElements();
+    document.documentElement.style.overflow = origHtmlOverflow;
+    document.body.style.overflow = origBodyOverflow;
+    scrollToInstant(origScrollX, origScrollY);
     hud.remove();
   }
 
@@ -332,35 +481,54 @@ async function initFullPageCapture() {
     let lastError = null;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       const res = await new Promise((resolve) => {
-        chrome.runtime.sendMessage({ action: 'CAPTURE_VISIBLE_TAB_RAW' }, (r) => {
-          if (chrome.runtime.lastError) {
-            resolve({ ok: false, error: chrome.runtime.lastError.message });
-            return;
-          }
-          resolve(r);
-        });
+        try {
+          chrome.runtime.sendMessage({ action: 'CAPTURE_VISIBLE_TAB_RAW' }, (r) => {
+            const err = chrome.runtime.lastError;
+            if (err) {
+              resolve({ ok: false, error: err.message });
+              return;
+            }
+            resolve(r || { ok: false, error: 'No response from background worker' });
+          });
+        } catch (e) {
+          resolve({ ok: false, error: e?.message || 'Failed to dispatch message' });
+        }
       });
       if (res && res.ok && res.dataUrl) return { dataUrl: res.dataUrl };
       lastError = (res && res.error) || 'Unknown capture error';
       console.warn(`[Full Page Capture] slice attempt ${attempt + 1}/${maxRetries + 1} failed:`, lastError);
-      // most likely hit captureVisibleTab's per-second quota - back off and retry
       await new Promise(r => setTimeout(r, CAPTURE_QUOTA_DELAY_MS));
     }
     return { dataUrl: null, error: lastError };
   }
 
   try {
+    let totalH = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
+    const viewH = window.innerHeight;
+    const viewW = window.innerWidth;
+
+    if (textEl) textEl.textContent = '📸 Pre-loading page assets & web fonts...';
+    await ensurePageImagesAndFontsLoaded(document, 2000);
+
     if (totalH <= viewH) {
       if (textEl) textEl.textContent = '📸 Capturing full page... 100%';
       await hideHudForCapture();
       const { dataUrl, error } = await captureSliceWithRetry();
       showHud();
+
+      // On failure the HUD must stay up so the error message is actually seen;
+      // showErrorAndRemoveHud restores the page and removes it afterwards.
       if (!dataUrl) {
         await showErrorAndRemoveHud(error || 'Could not capture the page.');
         return;
       }
+
+      restoreFixedElements();
+      document.documentElement.style.overflow = origHtmlOverflow;
+      document.body.style.overflow = origBodyOverflow;
+      scrollToInstant(origScrollX, origScrollY);
       hud.remove();
-      chrome.runtime.sendMessage({ action: 'OPEN_CROPPED_SCREENSHOT', dataUrl });
+      sendCroppedScreenshot(dataUrl);
       return;
     }
 
@@ -369,13 +537,24 @@ async function initFullPageCapture() {
     let lastSliceError = null;
 
     while (currentY < totalH) {
-      const scrollTargetY = Math.min(currentY, totalH - viewH);
-      window.scrollTo(0, scrollTargetY);
+      // Dynamically check totalH in case content expanded
+      totalH = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
+      const maxScrollY = Math.max(0, totalH - viewH);
+      const scrollTargetY = Math.min(currentY, maxScrollY);
+
+      scrollToInstant(0, scrollTargetY);
+      setFixedElementsVisibility(scrollTargetY, maxScrollY);
 
       const pct = Math.min(99, Math.round(((scrollTargetY + viewH) / totalH) * 100));
       if (textEl) textEl.textContent = `📸 Capturing full page (top to bottom)... ${pct}%`;
 
+      // Wait for any newly scrolled lazy images to load & decode
+      await ensurePageImagesAndFontsLoaded(document, 1000);
       await new Promise(r => setTimeout(r, CAPTURE_QUOTA_DELAY_MS));
+
+      // Record where the page really is: it may be unable to reach the requested
+      // offset, and each slice must be stitched at its true position.
+      const actualScrollY = Math.round(window.scrollY);
 
       await hideHudForCapture();
       const { dataUrl: sliceDataUrl, error: sliceError } = await captureSliceWithRetry();
@@ -384,23 +563,31 @@ async function initFullPageCapture() {
       if (sliceDataUrl) {
         captures.push({
           dataUrl: sliceDataUrl,
-          destY: scrollTargetY
+          scrollY: actualScrollY
         });
       } else {
         lastSliceError = sliceError;
       }
 
-      if (scrollTargetY + viewH >= totalH) break;
+      if (scrollTargetY + viewH >= totalH || (scrollTargetY >= maxScrollY && currentY > 0)) break;
       currentY += viewH;
     }
 
     if (textEl) textEl.textContent = '⚡ Stitching high-res screenshot...';
 
-    window.scrollTo(origScrollX, origScrollY);
+    // Page height as it was laid out during capture (scrollbars hidden); measuring
+    // after restoring overflow could reflow the page and change it.
+    const finalTotalH = totalH;
+
+    // Restore page state before image stitching canvas operations
+    restoreFixedElements();
+    document.documentElement.style.overflow = origHtmlOverflow;
+    document.body.style.overflow = origBodyOverflow;
+    scrollToInstant(origScrollX, origScrollY);
 
     const images = await Promise.all(captures.map(c => new Promise(res => {
       const img = new Image();
-      img.onload = () => res({ img, destY: c.destY });
+      img.onload = () => res({ img, scrollY: c.scrollY });
       img.onerror = () => res(null);
       img.src = c.dataUrl;
     })));
@@ -411,25 +598,63 @@ async function initFullPageCapture() {
       return;
     }
 
+    // srcScale: screenshot pixels per CSS pixel (the device pixel ratio).
+    // destScale: same ratio for the output, reduced when the page is so tall/wide
+    // that the canvas would exceed browser limits.
     const firstImg = validImages[0].img;
-    const scale = firstImg.width / viewW;
+    const srcScale = firstImg.width / viewW;
+    let destScale = srcScale;
+
+    const MAX_CANVAS_DIM = 16384;
+    if (finalTotalH * destScale > MAX_CANVAS_DIM) {
+      destScale = MAX_CANVAS_DIM / finalTotalH;
+    }
+    if (viewW * destScale > MAX_CANVAS_DIM) {
+      destScale = Math.min(destScale, MAX_CANVAS_DIM / viewW);
+    }
 
     const masterCanvas = document.createElement('canvas');
-    masterCanvas.width = Math.round(viewW * scale);
-    masterCanvas.height = Math.round(totalH * scale);
+    masterCanvas.width = Math.max(1, Math.round(viewW * destScale));
+    masterCanvas.height = Math.max(1, Math.round(finalTotalH * destScale));
     const ctx = masterCanvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, masterCanvas.width, masterCanvas.height);
 
-    validImages.forEach(({ img, destY }) => {
-      ctx.drawImage(img, 0, 0, img.width, img.height, 0, Math.round(destY * scale), img.width, img.height);
+    // Place every slice at the scroll offset it was captured at. Overlapping
+    // areas show identical content, so later slices simply paint over earlier
+    // ones, and a slice that failed to capture leaves a blank gap rather than
+    // shifting everything after it.
+    validImages.forEach(({ img, scrollY }) => {
+      const destY = Math.round(scrollY * destScale);
+      const destH = Math.round((img.height / srcScale) * destScale) + 1; // +1px avoids rounding seams
+      ctx.drawImage(img, 0, 0, img.width, img.height, 0, destY, masterCanvas.width, destH);
     });
 
-    const fullPageDataUrl = masterCanvas.toDataURL('image/png');
+    // Runtime messages are capped at 64 MB, so fall back to progressively
+    // smaller JPEGs if the PNG is too big to hand to the background worker.
+    function exportCanvasDataUrl(cnv) {
+      const MAX_PAYLOAD_CHARS = 48 * 1024 * 1024;
+      const attempts = [['image/png'], ['image/jpeg', 0.9], ['image/jpeg', 0.7]];
+      for (const [type, quality] of attempts) {
+        try {
+          const u = cnv.toDataURL(type, quality);
+          if (u && u.length > 100 && u !== 'data:,' && u.length <= MAX_PAYLOAD_CHARS) return u;
+        } catch (e) {
+          console.warn(type + ' export failed, trying next format', e);
+        }
+      }
+      return null;
+    }
+
+    const fullPageDataUrl = exportCanvasDataUrl(masterCanvas);
+
+    if (!fullPageDataUrl) {
+      await showErrorAndRemoveHud('Failed to process image payload (page may be too large).');
+      return;
+    }
+
     hud.remove();
-
-    chrome.runtime.sendMessage({
-      action: 'OPEN_CROPPED_SCREENSHOT',
-      dataUrl: fullPageDataUrl
-    });
+    sendCroppedScreenshot(fullPageDataUrl);
   } catch (err) {
     await showErrorAndRemoveHud(err && err.message ? err.message : String(err));
   }

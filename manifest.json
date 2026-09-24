@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Awesome Screen Recorder & Tab Capture Pro",
+  "name": "wbify screen recorder",
   "version": "1.2.0",
   "description": "Screen recorder, browser tab capture, webcam PIP, live markup annotations, and screenshot editor.",
   "permissions": [
@@ -11,14 +11,14 @@
     "tabs",
     "notifications",
     "contextMenus",
-    "downloads"
-  ],
-  "host_permissions": [
-    "<all_urls>"
+    "downloads",
+    "windows",
+    "tabCapture",
+    "desktopCapture"
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Awesome Screen Recorder Pro",
+    "default_title": "wbify screen recorder",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -29,33 +29,6 @@
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "content.js"
-      ],
-      "css": [
-        "content.css"
-      ],
-      "run_at": "document_idle"
-    }
-  ],
-  "web_accessible_resources": [
-    {
-      "resources": [
-        "icons/*",
-        "studio.html",
-        "studio.js",
-        "content.css"
-      ],
-      "matches": [
-        "<all_urls>"
-      ]
-    }
-  ],
   "icons": {
     "16": "icons/icon16.png",
     "32": "icons/icon32.png",

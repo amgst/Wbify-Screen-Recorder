@@ -1,4 +1,4 @@
-# Awesome Screen Recorder Pro - Chrome Extension (Manifest V3)
+# wbify screen recorder - Chrome Extension (Manifest V3)
 
 ## Quick Installation in Google Chrome:
 1. **Unzip** this downloaded ZIP archive into any folder on your computer.
@@ -6,7 +6,7 @@
 3. In the top right corner, switch on **"Developer mode"**.
 4. Click **"Load unpacked"** in the top left corner.
 5. Select the extracted folder (containing `manifest.json`).
-6. Click the extension puzzle piece in your Chrome toolbar and **Pin** "Awesome Screen Recorder Pro".
+6. Click the extension puzzle piece in your Chrome toolbar and **Pin** "wbify screen recorder".
 
 ## Features:
 - 🖥️ **Record Entire Screen, Window, or Browser Tab** with high-frame-rate 60fps video.

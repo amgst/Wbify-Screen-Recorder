@@ -5,7 +5,16 @@ let mediaStream = null;
 let timerInterval = null;
 let recordingSeconds = 0;
 let isPaused = false;
+let liveRecordingState = 'idle';
+// Wall-clock recording length (excluding paused time), used to write the
+// duration into the WebM header when recording stops.
+let recordingStartedAt = 0;
+let pausedTotalMs = 0;
+let pauseStartedAt = 0;
 let currentRecordedBlob = null;
+let currentRecordedFilename = null;
+// 'mp4' when the browser can record H.264/AAC directly, otherwise 'webm'
+let recordingContainer = 'webm';
 
 // Extra source streams kept around only so we can stop their tracks / tear
 // down compositing when recording ends.
@@ -14,6 +23,9 @@ let rawCamStream = null;
 let rawMicStream = null;
 let pipRafId = null;
 let pipAudioCtx = null;
+// Plays a captured tab's audio back through the speakers (Chrome mutes a tab
+// while it is being captured unless something plays the audio again).
+let tabPlaybackCtx = null;
 
 // Screenshot markup state
 let activeTool = 'arrow';
@@ -29,6 +41,17 @@ const urlParams = new URLSearchParams(window.location.search);
 const initialAction = urlParams.get('action');
 const initialView = urlParams.get('view');
 
+// One-time direct-capture ids handed over by the popup (skip asking again in
+// Studio after Chrome's chooser has already approved the source).
+let pendingTabCapture = urlParams.get('streamId')
+  ? {
+      streamId: urlParams.get('streamId'),
+      tabId: parseInt(urlParams.get('tabId'), 10),
+      windowId: parseInt(urlParams.get('windowId'), 10)
+    }
+  : null;
+let pendingDesktopStreamId = urlParams.get('desktopStreamId') || null;
+
 // Nav buttons
 const navStudio = document.getElementById('navStudio');
 const navScreenshot = document.getElementById('navScreenshot');
@@ -38,6 +61,7 @@ const navSettings = document.getElementById('navSettings');
 const cardLauncher = document.getElementById('cardLauncher');
 const liveStudioView = document.getElementById('liveStudioView');
 const cardReviewVideo = document.getElementById('cardReviewVideo');
+const cardVideoEditor = document.getElementById('cardVideoEditor');
 const editorView = document.getElementById('editorView');
 const libraryContainer = document.getElementById('libraryContainer');
 const settingsContainer = document.getElementById('settingsContainer');
@@ -47,9 +71,11 @@ function switchView(view) {
   cardLauncher.style.display = 'none';
   liveStudioView.style.display = 'none';
   cardReviewVideo.style.display = 'none';
+  cardVideoEditor.style.display = 'none';
   editorView.style.display = 'none';
   libraryContainer.style.display = 'none';
   if (settingsContainer) settingsContainer.style.display = 'none';
+  if (view !== 'videoedit') document.getElementById('editVideoEl').pause();
 
   if (view === 'studio') {
     if (navStudio) navStudio.classList.add('active');
@@ -61,6 +87,8 @@ function switchView(view) {
     if (navLibrary) navLibrary.classList.add('active');
     libraryContainer.style.display = 'block';
     renderLibrary();
+  } else if (view === 'videoedit') {
+    cardVideoEditor.style.display = 'block';
   } else if (view === 'settings') {
     if (navSettings) navSettings.classList.add('active');
     if (settingsContainer) settingsContainer.style.display = 'block';
@@ -88,7 +116,8 @@ function getRecordingOpts() {
     mic: urlParams.has('mic') ? urlParams.get('mic') === '1' : true,
     webcam: urlParams.get('webcam') === '1',
     sysAudio: urlParams.has('sysAudio') ? urlParams.get('sysAudio') === '1' : true,
-    countdown: urlParams.has('countdown') ? (parseInt(urlParams.get('countdown'), 10) || 0) : 0
+    countdown: urlParams.has('countdown') ? (parseInt(urlParams.get('countdown'), 10) || 0) : 0,
+    target: urlParams.get('target') || 'desktop'
   };
 }
 
@@ -116,6 +145,94 @@ function runCountdown(seconds) {
   });
 }
 
+function setButtonLabel(button, label) {
+  if (!button) return;
+  const labelEl = button.querySelector('span:last-child') || button;
+  labelEl.textContent = label;
+}
+
+function setLiveRecordingUi(state) {
+  liveRecordingState = state;
+  const badge = document.getElementById('liveBadge');
+  const badgeText = document.getElementById('liveBadgeText');
+  const title = document.getElementById('livePlaceholderTitle');
+  const desc = document.getElementById('livePlaceholderDesc');
+  const pauseBtn = document.getElementById('btnPauseResume');
+  const stopBtn = document.getElementById('btnStopRecord');
+
+  if (badge) {
+    badge.classList.remove('recording', 'paused', 'stopping');
+    if (['recording', 'paused', 'stopping'].includes(state)) badge.classList.add(state);
+  }
+
+  if (state === 'preparing') {
+    if (badgeText) badgeText.textContent = 'PREPARING';
+    if (title) title.textContent = 'Preparing recording...';
+    if (desc) desc.textContent = 'Choose your screen, then wait for the countdown to finish. Recording starts when the badge turns red.';
+    if (pauseBtn) pauseBtn.disabled = true;
+    if (stopBtn) {
+      stopBtn.disabled = false;
+      setButtonLabel(stopBtn, 'Cancel');
+    }
+  } else if (state === 'recording') {
+    if (badgeText) badgeText.textContent = 'RECORDING ACTIVE';
+    if (title) title.textContent = 'Your screen is being recorded';
+    if (desc) desc.textContent = 'Switch to the window you want to record. Come back here when you are ready to stop and save.';
+    if (pauseBtn) pauseBtn.disabled = false;
+    if (stopBtn) {
+      stopBtn.disabled = false;
+      setButtonLabel(stopBtn, 'Stop & Save Recording');
+    }
+  } else if (state === 'paused') {
+    if (badgeText) badgeText.textContent = 'PAUSED';
+    if (title) title.textContent = 'Recording paused';
+    if (desc) desc.textContent = 'Resume when you are ready to continue, or stop to save what has already been captured.';
+    if (pauseBtn) pauseBtn.disabled = false;
+    if (stopBtn) {
+      stopBtn.disabled = false;
+      setButtonLabel(stopBtn, 'Stop & Save Recording');
+    }
+  } else if (state === 'stopping') {
+    if (badgeText) badgeText.textContent = 'SAVING';
+    if (title) title.textContent = 'Saving recording...';
+    if (desc) desc.textContent = 'Finishing the video file. Keep this tab open until the review screen appears.';
+    if (pauseBtn) pauseBtn.disabled = true;
+    if (stopBtn) {
+      stopBtn.disabled = true;
+      setButtonLabel(stopBtn, 'Saving...');
+    }
+  } else {
+    if (pauseBtn) pauseBtn.disabled = false;
+    if (stopBtn) {
+      stopBtn.disabled = false;
+      setButtonLabel(stopBtn, 'Stop & Save Recording');
+    }
+  }
+}
+
+function showRecordingNotification(message) {
+  if (!(chrome.notifications && chrome.notifications.create)) return;
+  chrome.notifications.create({
+    type: 'basic',
+    iconUrl: 'icons/icon128.png',
+    title: 'wbify screen recorder',
+    message
+  }, () => void chrome.runtime.lastError);
+}
+
+function stopActiveRecording() {
+  if (!(mediaRecorder && mediaRecorder.state !== 'inactive')) return false;
+  if (liveRecordingState === 'stopping') return true;
+  setLiveRecordingUi('stopping');
+  try {
+    if (mediaRecorder.state !== 'paused') mediaRecorder.requestData();
+  } catch (e) {
+    // requestData is best effort; stop() below still finalizes the recording.
+  }
+  mediaRecorder.stop();
+  return true;
+}
+
 // Mixes any combination of system/tab audio + microphone audio into a
 // single track, since MediaRecorder does not reliably record more than
 // one audio track per stream.
@@ -125,6 +242,9 @@ function mixAudioTracks(streams) {
   if (usable.length === 1) return usable[0].getAudioTracks()[0];
 
   pipAudioCtx = new AudioContext();
+  // A context created without a recent user gesture starts suspended and
+  // would record silence.
+  pipAudioCtx.resume().catch(() => {});
   const dest = pipAudioCtx.createMediaStreamDestination();
   usable.forEach(s => pipAudioCtx.createMediaStreamSource(s).connect(dest));
   return dest.stream.getAudioTracks()[0];
@@ -189,9 +309,56 @@ function buildWebcamPipTrack(displayStream, camStream) {
   return pipStream;
 }
 
+// Opens the tab chosen in the popup directly, without Chrome's share picker.
+async function getTabCaptureStream(streamId, withAudio) {
+  const source = { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } };
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: withAudio ? source : false,
+    video: source
+  });
+
+  if (stream.getAudioTracks().length > 0) {
+    tabPlaybackCtx = new AudioContext();
+    tabPlaybackCtx.resume().catch(() => {});
+    tabPlaybackCtx
+      .createMediaStreamSource(new MediaStream(stream.getAudioTracks()))
+      .connect(tabPlaybackCtx.destination);
+  }
+  return stream;
+}
+
+async function getDesktopCaptureStream(streamId, withAudio) {
+  const source = { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: streamId } };
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: withAudio ? source : false,
+      video: source
+    });
+  } catch (err) {
+    if (!withAudio) throw err;
+    console.warn('Desktop audio was unavailable; retrying screen recording without system audio', err);
+    showToast('System audio was not available, so recording started without it.', true);
+    return navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: source
+    });
+  }
+}
+
+function focusRecordedTab({ tabId, windowId }) {
+  if (!(chrome.tabs && chrome.tabs.update) || isNaN(tabId)) return;
+  chrome.tabs.update(tabId, { active: true }, () => {
+    void chrome.runtime.lastError; // tab may have been closed already
+    if (!isNaN(windowId) && chrome.windows && chrome.windows.update) {
+      chrome.windows.update(windowId, { focused: true }, () => void chrome.runtime.lastError);
+    }
+  });
+}
+
 // Start Screen / Tab Recording
 async function startRecordingFlow(isCameraOnly = false) {
   const opts = getRecordingOpts();
+  let capturedTab = null;
   try {
     let finalVideoTrack;
     let previewStream;
@@ -204,10 +371,37 @@ async function startRecordingFlow(isCameraOnly = false) {
       finalVideoTrack = rawCamStream.getVideoTracks()[0];
       previewStream = rawCamStream;
     } else {
-      rawDisplayStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 60 },
-        audio: opts.sysAudio
-      });
+      const tabCapture = pendingTabCapture;
+      pendingTabCapture = null;
+
+      if (tabCapture) {
+        try {
+          rawDisplayStream = await getTabCaptureStream(tabCapture.streamId, opts.sysAudio);
+          capturedTab = tabCapture;
+        } catch (tabErr) {
+          // e.g. the id expired or the page cannot be captured: use the normal picker
+          console.warn('Direct tab capture failed, falling back to the share picker', tabErr);
+          rawDisplayStream = null;
+        }
+      }
+
+      if (!rawDisplayStream && opts.target === 'desktop' && pendingDesktopStreamId) {
+        const desktopStreamId = pendingDesktopStreamId;
+        pendingDesktopStreamId = null;
+        rawDisplayStream = await getDesktopCaptureStream(desktopStreamId, opts.sysAudio);
+      }
+
+      if (!rawDisplayStream) {
+        // displaySurface is only a hint: it makes the picker open on the
+        // matching tab (Browser Tab vs Entire Screen) chosen in the popup.
+        rawDisplayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            frameRate: 60,
+            displaySurface: opts.target === 'tab' ? 'browser' : 'monitor'
+          },
+          audio: opts.sysAudio
+        });
+      }
 
       if (opts.webcam) {
         try {
@@ -248,13 +442,21 @@ async function startRecordingFlow(isCameraOnly = false) {
     recordedChunks = [];
     recordingSeconds = 0;
     isPaused = false;
+    document.getElementById('btnPauseResume').textContent = 'Pause';
 
+    // Only the camera is previewed live. A screen or tab capture usually contains
+    // this very page, so previewing it would show the recording inside itself
+    // (a repeating, zoomed-in "hall of mirrors" in the saved video).
     const videoPreview = document.getElementById('liveVideoPreview');
-    videoPreview.srcObject = mediaStream;
+    const previewPlaceholder = document.getElementById('livePreviewPlaceholder');
+    videoPreview.srcObject = isCameraOnly ? mediaStream : null;
+    videoPreview.style.display = isCameraOnly ? 'block' : 'none';
+    previewPlaceholder.style.display = isCameraOnly ? 'none' : 'flex';
 
     cardLauncher.style.display = 'none';
     cardReviewVideo.style.display = 'none';
     liveStudioView.style.display = 'flex';
+    setLiveRecordingUi('preparing');
 
     const timerEl = document.getElementById('liveTimerText');
     timerEl.textContent = '00:00';
@@ -264,19 +466,31 @@ async function startRecordingFlow(isCameraOnly = false) {
       ? rawCamStream.getVideoTracks()[0]
       : rawDisplayStream.getVideoTracks()[0];
     sourceVideoTrack.onended = () => {
-      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-        mediaRecorder.stop();
-      }
+      stopActiveRecording();
     };
 
     await runCountdown(opts.countdown);
 
-    // MediaRecorder setup
-    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')
-      ? 'video/webm;codecs=vp9,opus'
-      : 'video/webm';
+    // The share may have been stopped from Chrome's own bar during the countdown
+    if (sourceVideoTrack.readyState === 'ended') {
+      teardownRecordingSources();
+      clearInterval(timerInterval);
+      liveStudioView.style.display = 'none';
+      cardLauncher.style.display = 'block';
+      setLiveRecordingUi('idle');
+      return;
+    }
 
-    mediaRecorder = new MediaRecorder(mediaStream, { mimeType });
+    // MediaRecorder setup: MP4 (H.264 + AAC) when this browser can record it, else WebM
+    const picked = pickRecorderMimeType(true);
+    if (!picked) throw new Error('This browser cannot record video.');
+    recordingContainer = picked.container;
+
+    mediaRecorder = new MediaRecorder(mediaStream, {
+      mimeType: picked.mimeType,
+      videoBitsPerSecond: 8000000,
+      audioBitsPerSecond: 128000
+    });
 
     mediaRecorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) {
@@ -284,20 +498,52 @@ async function startRecordingFlow(isCameraOnly = false) {
       }
     };
 
-    mediaRecorder.onstop = () => {
+    mediaRecorder.onstop = async () => {
       clearInterval(timerInterval);
-      const blob = new Blob(recordedChunks, { type: 'video/webm' });
+      setLiveRecordingUi('stopping');
+      teardownRecordingSources();
+      liveStudioView.style.display = 'none';
+
+      if (recordedChunks.length === 0) {
+        // Nothing was captured (e.g. the share ended immediately)
+        cardLauncher.style.display = 'block';
+        setLiveRecordingUi('idle');
+        showToast('Nothing was recorded, so no video was saved.', true);
+        return;
+      }
+
+      // MediaRecorder output has no duration, which makes the video unseekable.
+      // Write the real length into the file so playback, the Library and saved
+      // copies all behave normally.
+      const stoppedAt = Date.now();
+      const openPauseMs = pauseStartedAt ? stoppedAt - pauseStartedAt : 0;
+      const durationMs = stoppedAt - recordingStartedAt - pausedTotalMs - openPauseMs;
+      const rawBlob = new Blob(recordedChunks, { type: recordingContainer === 'mp4' ? 'video/mp4' : 'video/webm' });
+      let blob = rawBlob;
+      try {
+        blob = await fixVideoDuration(rawBlob, durationMs);
+      } catch (err) {
+        // Patching is a nicety; never let it stop the recording from being saved
+        console.warn('Duration patch unavailable, saving original recording', err);
+      }
       currentRecordedBlob = blob;
 
-      const videoUrl = URL.createObjectURL(blob);
       const reviewEl = document.getElementById('reviewVideoEl');
-      reviewEl.src = videoUrl;
+      if (reviewEl.src.startsWith('blob:')) URL.revokeObjectURL(reviewEl.src);
+      reviewEl.src = URL.createObjectURL(blob);
 
-      liveStudioView.style.display = 'none';
       cardReviewVideo.style.display = 'block';
 
-      teardownRecordingSources();
       saveVideoToStorage(blob, recordingSeconds);
+
+      const format = containerOfBlob(blob);
+      currentRecordedFilename = 'screen-recording-' + Date.now() + '.' + format;
+      document.getElementById('btnDownloadReviewWebm').textContent = 'Download Video (' + format.toUpperCase() + ')';
+      if (format === 'webm') showToast('This browser cannot record MP4 directly, so the video was saved as WebM.', true);
+      setVideoSaveStatus('');
+      autoSaveRecording(blob, currentRecordedFilename);
+      showRecordingNotification('Recording stopped and the video is ready to review.');
+      setLiveRecordingUi('idle');
     };
 
     clearInterval(timerInterval);
@@ -308,17 +554,122 @@ async function startRecordingFlow(isCameraOnly = false) {
       }
     }, 1000);
 
+    recordingStartedAt = Date.now();
+    pausedTotalMs = 0;
+    pauseStartedAt = 0;
     mediaRecorder.start(1000);
+    setRecordingIndicator('recording');
+    setLiveRecordingUi('recording');
+    showRecordingNotification('Recording started. Return to the Studio tab when you want to stop and save.');
+    showToast('Recording started.', false);
+
+    // The recorded tab was in front when Start was clicked; the studio tab took
+    // over for the countdown, so hand focus back so the user can just carry on.
+    if (capturedTab) focusRecordedTab(capturedTab);
 
   } catch (err) {
     console.error('Failed to start recording stream', err);
+    const cancelled = err && (err.name === 'NotAllowedError' || err.name === 'AbortError');
+    showToast(cancelled
+      ? 'Recording was not started: screen sharing was cancelled or blocked.'
+      : 'Could not start recording: ' + (err && err.message ? err.message : err), true);
     teardownRecordingSources();
+    setLiveRecordingUi('idle');
     cardLauncher.style.display = 'block';
     liveStudioView.style.display = 'none';
   }
 }
 
+// ---------------- Toolbar icon recording indicator ----------------
+// While recording, the extension's toolbar icon shows a pulsing red dot (amber
+// and steady while paused), so recording state is visible from any tab.
+const REC_ICON_SIZES = [16, 32];
+let recIconState = null; // 'recording' | 'paused' | null
+let recIconTimer = null;
+let recIconBase = null; // promise of the icon image, loaded once
+
+function loadRecIconBase() {
+  if (!recIconBase) {
+    recIconBase = new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => resolve(null);
+      img.src = chrome.runtime.getURL('icons/icon48.png');
+    });
+  }
+  return recIconBase;
+}
+
+function renderRecIcon(base, color, alpha) {
+  const imageData = {};
+  REC_ICON_SIZES.forEach((size) => {
+    const c = document.createElement('canvas');
+    c.width = size;
+    c.height = size;
+    const g = c.getContext('2d', { willReadFrequently: true });
+    g.drawImage(base, 0, 0, size, size);
+    const r = size * 0.3;
+    const cx = size - r;
+    const cy = r;
+    g.beginPath();
+    g.arc(cx, cy, r + Math.max(1, size * 0.06), 0, Math.PI * 2);
+    g.fillStyle = '#ffffff';
+    g.fill();
+    g.beginPath();
+    g.arc(cx, cy, r, 0, Math.PI * 2);
+    g.globalAlpha = alpha;
+    g.fillStyle = color;
+    g.fill();
+    imageData[size] = g.getImageData(0, 0, size, size);
+  });
+  return imageData;
+}
+
+function setToolbarIcon(details) {
+  try {
+    const p = chrome.action.setIcon(details);
+    if (p && p.catch) p.catch(() => {});
+  } catch (e) { /* icon is cosmetic; never let it affect recording */ }
+}
+
+function setRecordingIndicator(state) {
+  clearInterval(recIconTimer);
+  recIconTimer = null;
+  recIconState = state;
+  if (!(chrome.action && chrome.action.setIcon)) return;
+
+  if (!state) {
+    setToolbarIcon({ path: { 16: 'icons/icon16.png', 32: 'icons/icon32.png', 48: 'icons/icon48.png', 128: 'icons/icon128.png' } });
+    if (chrome.action.setTitle) chrome.action.setTitle({ title: 'wbify screen recorder' });
+    return;
+  }
+
+  if (chrome.action.setTitle) {
+    chrome.action.setTitle({ title: state === 'paused' ? 'Recording paused' : 'Recording in progress' });
+  }
+  loadRecIconBase().then((base) => {
+    if (!base || recIconState !== state) return;
+    if (state === 'paused') {
+      setToolbarIcon({ imageData: renderRecIcon(base, '#f59e0b', 1) });
+      return;
+    }
+    let bright = true;
+    const tick = () => {
+      setToolbarIcon({ imageData: renderRecIcon(base, '#ef4444', bright ? 1 : 0.3) });
+      bright = !bright;
+    };
+    tick();
+    recIconTimer = setInterval(tick, 500);
+  });
+}
+
+// If this tab is closed mid-recording, don't leave the icon stuck on "recording"
+window.addEventListener('pagehide', () => {
+  if (recIconState) setRecordingIndicator(null);
+});
+
 function teardownRecordingSources() {
+  setRecordingIndicator(null);
   if (pipRafId) {
     cancelAnimationFrame(pipRafId);
     pipRafId = null;
@@ -327,6 +678,10 @@ function teardownRecordingSources() {
     pipAudioCtx.close().catch(() => {});
     pipAudioCtx = null;
   }
+  if (tabPlaybackCtx) {
+    tabPlaybackCtx.close().catch(() => {});
+    tabPlaybackCtx = null;
+  }
   [rawDisplayStream, rawCamStream, rawMicStream].forEach(s => {
     if (s) s.getTracks().forEach(t => t.stop());
   });
@@ -334,6 +689,15 @@ function teardownRecordingSources() {
   rawCamStream = null;
   rawMicStream = null;
 }
+
+// Closing or reloading this tab mid-recording throws the video away, so ask first.
+window.addEventListener('beforeunload', (e) => {
+  const recording = mediaRecorder && mediaRecorder.state !== 'inactive';
+  if (recording || editAbort) {
+    e.preventDefault();
+    e.returnValue = '';
+  }
+});
 
 // Button Listeners
 document.getElementById('btnLaunchScreenRec').addEventListener('click', () => startRecordingFlow(false));
@@ -345,22 +709,32 @@ document.getElementById('btnPauseResume').addEventListener('click', () => {
   if (isPaused) {
     mediaRecorder.resume();
     isPaused = false;
+    pausedTotalMs += Date.now() - pauseStartedAt;
+    pauseStartedAt = 0;
     document.getElementById('btnPauseResume').textContent = 'Pause';
+    setRecordingIndicator('recording');
+    setLiveRecordingUi('recording');
   } else {
     mediaRecorder.pause();
     isPaused = true;
+    pauseStartedAt = Date.now();
     document.getElementById('btnPauseResume').textContent = 'Resume';
+    setRecordingIndicator('paused');
+    setLiveRecordingUi('paused');
   }
 });
 
 // Stop
 document.getElementById('btnStopRecord').addEventListener('click', () => {
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
-  }
-  if (mediaStream) {
-    mediaStream.getTracks().forEach(t => t.stop());
-  }
+  if (liveRecordingState === 'stopping') return;
+  if (stopActiveRecording()) return;
+
+  // Cancel while preparing/counting down, before MediaRecorder has started.
+  teardownRecordingSources();
+  clearInterval(timerInterval);
+  setLiveRecordingUi('idle');
+  liveStudioView.style.display = 'none';
+  cardLauncher.style.display = 'block';
 });
 
 // Record Again
@@ -369,70 +743,143 @@ document.getElementById('btnRecordAgain').addEventListener('click', () => {
   cardLauncher.style.display = 'block';
 });
 
-// Download Video
-document.getElementById('btnDownloadReviewWebm').addEventListener('click', () => {
-  if (!currentRecordedBlob) return;
-  const filename = 'screen-recording-' + Date.now() + '.webm';
-  downloadMediaFile(currentRecordedBlob, filename);
+// Where save results are reported: the recording review card and the video editor
+const REVIEW_STATUS = { statusId: 'videoSaveStatus', showBtnId: 'btnShowSavedVideo' };
+const EDIT_STATUS = { statusId: 'editSaveStatus', showBtnId: 'btnShowSavedEdit' };
+
+function setVideoSaveStatus(message, isError, downloadId, target = REVIEW_STATUS) {
+  const el = document.getElementById(target.statusId);
+  if (!el) return;
+  el.textContent = message;
+  el.style.color = isError ? '#b45309' : '#16a34a';
+  el.style.display = message ? 'block' : 'none';
+
+  // "Show in folder" only works for downloads made through chrome.downloads
+  const btnShow = document.getElementById(target.showBtnId);
+  if (btnShow) {
+    if (downloadId === undefined) {
+      delete btnShow.dataset.downloadId;
+      btnShow.style.display = 'none';
+    } else {
+      btnShow.dataset.downloadId = String(downloadId);
+      btnShow.style.display = 'inline-flex';
+    }
+  }
+}
+
+[REVIEW_STATUS, EDIT_STATUS].forEach(({ showBtnId }) => {
+  document.getElementById(showBtnId).addEventListener('click', (e) => {
+    const id = parseInt(e.currentTarget.dataset.downloadId, 10);
+    if (!isNaN(id) && chrome.downloads && chrome.downloads.show) chrome.downloads.show(id);
+  });
 });
 
-// Grabs a single frame from an OS-level screen/window/monitor picker
-// (getDisplayMedia), unlike "Capture Visible Part" which is restricted by
-// Chrome to the current tab's own viewport and can never see other
-// monitors, the desktop, or other apps.
-async function captureEntireScreenSnapshot() {
-  let stream;
+// Saves a video and reports what really happened, using the actual file path
+// Chrome wrote to (not just "the download started").
+async function saveRecordingAndReport(blob, filename, target = REVIEW_STATUS) {
+  const report = (message, isError, downloadId) => setVideoSaveStatus(message, isError, downloadId, target);
+
+  let result;
   try {
-    stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    result = await saveMediaFile(blob, filename);
   } catch (err) {
-    console.warn('Entire screen snapshot cancelled or failed', err);
+    console.error('Saving video failed', err);
+    report('Could not save the video: ' + err.message + ' It is still in your Library.', true);
     return;
   }
 
-  const track = stream.getVideoTracks()[0];
-  const video = document.createElement('video');
-  video.muted = true;
-  video.playsInline = true;
-  video.srcObject = stream;
+  if (result.status === 'canceled') {
+    report('Save canceled - the video is still in your Library. Use the download button to save it.', true);
+    return;
+  }
 
-  await new Promise((resolve) => {
-    video.onloadedmetadata = () => {
-      video.play().then(resolve).catch(resolve);
-    };
-  });
+  const fallbackNote = result.fallbackReason ? ' (' + result.fallbackReason + ')' : '';
 
-  // Small delay to ensure frame data is rendered into video element
-  await new Promise(r => setTimeout(r, 150));
+  if (result.downloadId === undefined) {
+    // Written straight into the chosen folder (or anchor fallback): no download record to check
+    report('Saved to ' + result.where + '.' + fallbackNote + ' A copy is also in your Library.', !!result.fallbackReason);
+    return;
+  }
 
-  const width = video.videoWidth || 1920;
-  const height = video.videoHeight || 1080;
-
-  const snapCanvas = document.createElement('canvas');
-  snapCanvas.width = width;
-  snapCanvas.height = height;
-  const ctx = snapCanvas.getContext('2d');
-  ctx.drawImage(video, 0, 0, width, height);
-
-  track.stop();
-  stream.getTracks().forEach(t => t.stop());
-
-  const dataUrl = snapCanvas.toDataURL('image/png');
-  autoStoreScreenshot(dataUrl);
-  initCanvasWithImage(dataUrl);
+  report('Saving...', false);
+  const check = await verifyDownload(result.downloadId);
+  if (check.state === 'complete') {
+    report('Saved: ' + check.path + fallbackNote + ' - a copy is also in your Library.', !!result.fallbackReason, result.downloadId);
+  } else if (check.state === 'interrupted') {
+    report('Chrome could not finish saving the file (' + check.error + '). It is still in your Library - use the download button to retry.', true);
+  } else {
+    report('Still saving' + (check.path ? ' to ' + check.path : '') + ' - check your downloads if it does not appear.', false, result.downloadId);
+  }
 }
+
+// Runs right after a recording (or an edited export) is ready so it reaches
+// disk without the user having to remember to click Download.
+async function autoSaveRecording(blob, filename, target = REVIEW_STATUS) {
+  const { auto_save_video } = await getStorageValues(['auto_save_video']);
+  if (auto_save_video === false) {
+    setVideoSaveStatus('Auto-save is off - use the download button to save it to disk. (It is kept in your Library.)', true, undefined, target);
+    return;
+  }
+  setVideoSaveStatus('Saving...', false, undefined, target);
+  await saveRecordingAndReport(blob, filename, target);
+}
+
+// Download Video
+document.getElementById('btnDownloadReviewWebm').addEventListener('click', () => {
+  if (!currentRecordedBlob) return;
+  saveRecordingAndReport(currentRecordedBlob, currentRecordedFilename || ('screen-recording-' + Date.now() + '.' + containerOfBlob(currentRecordedBlob)));
+});
+
+document.getElementById('btnEditRecording').addEventListener('click', () => {
+  if (currentRecordedBlob) openVideoEditor(currentRecordedBlob, recordingSeconds, 'review');
+});
 
 // ---------------- Persistence: IndexedDB (videos) + chrome.storage (index) ----------------
 const VIDEO_DB_NAME = 'AwesomeRecorderDB';
 const VIDEO_DB_STORE = 'videos';
+// Holds the FileSystemDirectoryHandle for the user's chosen save folder
+// (handles can't live in chrome.storage, but IndexedDB can persist them).
+const SETTINGS_DB_STORE = 'settings';
+const SAVE_DIR_KEY = 'save_dir_handle';
 
 function openVideoDB() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(VIDEO_DB_NAME, 1);
+    const req = indexedDB.open(VIDEO_DB_NAME, 2);
     req.onupgradeneeded = () => {
-      req.result.createObjectStore(VIDEO_DB_STORE, { keyPath: 'id' });
+      const db = req.result;
+      if (!db.objectStoreNames.contains(VIDEO_DB_STORE)) {
+        db.createObjectStore(VIDEO_DB_STORE, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(SETTINGS_DB_STORE)) {
+        db.createObjectStore(SETTINGS_DB_STORE);
+      }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
+  });
+}
+
+async function getSavedDirHandle() {
+  try {
+    const db = await openVideoDB();
+    return await new Promise((resolve, reject) => {
+      const req = db.transaction(SETTINGS_DB_STORE, 'readonly').objectStore(SETTINGS_DB_STORE).get(SAVE_DIR_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  } catch (err) {
+    console.warn('Could not read saved folder handle', err);
+    return null;
+  }
+}
+
+async function setSavedDirHandle(handle) {
+  const db = await openVideoDB();
+  await new Promise((resolve, reject) => {
+    const tx = db.transaction(SETTINGS_DB_STORE, 'readwrite');
+    tx.objectStore(SETTINGS_DB_STORE).put(handle, SAVE_DIR_KEY);
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
   });
 }
 
@@ -473,20 +920,25 @@ function deleteVideoBlob(id) {
   }));
 }
 
+// Stores a video in the Library and returns its id (null on failure).
 async function saveVideoToStorage(blob, duration) {
   try {
     const db = await openVideoDB();
     const id = 'vid_' + Date.now();
+    const seconds = Math.round(duration || 0);
+    const format = containerOfBlob(blob);
     await new Promise((resolve, reject) => {
       const tx = db.transaction(VIDEO_DB_STORE, 'readwrite');
-      tx.objectStore(VIDEO_DB_STORE).put({ id, blob, duration });
+      tx.objectStore(VIDEO_DB_STORE).put({ id, blob, duration: seconds, format });
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
-    await addLibraryIndexEntry({ id, type: 'video', duration, createdAt: Date.now() });
+    await addLibraryIndexEntry({ id, type: 'video', duration: seconds, format, createdAt: Date.now() });
     checkStorageQuotaAlert();
+    return id;
   } catch (err) {
     console.error('Failed to save recording to IndexedDB', err);
+    return null;
   }
 }
 
@@ -502,6 +954,12 @@ let activeResizeHandle = null;
 let dragStartX = 0;
 let dragStartY = 0;
 let currentLiveShape = null;
+
+// Library entry holding the edited export of the current image (so repeat
+// downloads update it rather than adding copies), and whether the base image
+// itself was changed (cropped).
+let exportedShotId = null;
+let imageModified = false;
 
 let strokeWidth = 4;
 let stepCounter = 1;
@@ -526,6 +984,9 @@ function initCanvasWithImage(imgSrc) {
     selectedShapeId = null;
     stepCounter = 1;
     isCropMode = false;
+    exportedShotId = null;
+    imageModified = false;
+    canvasHistory = [JSON.stringify(shapes)];
     document.getElementById('cropActionBar').style.display = 'none';
     redrawCanvas(true);
 
@@ -551,6 +1012,9 @@ function initCanvasWithImage(imgSrc) {
       selectedShapeId = null;
       stepCounter = 1;
       isCropMode = false;
+      exportedShotId = null;
+      imageModified = false;
+      canvasHistory = [JSON.stringify(shapes)];
       redrawCanvas(true);
       switchView('screenshot');
     }
@@ -558,9 +1022,15 @@ function initCanvasWithImage(imgSrc) {
   screenshotImage.src = imgSrc;
 }
 
+// History holds a snapshot of `shapes` after every change; the last entry is
+// always the current state, so undo restores the one before it.
 function saveCanvasState() {
   canvasHistory.push(JSON.stringify(shapes));
   if (canvasHistory.length > 30) canvasHistory.shift();
+}
+
+function syncStepCounter() {
+  stepCounter = shapes.reduce((max, s) => (s.type === 'step' ? Math.max(max, s.stepNumber || 0) : max), 0) + 1;
 }
 
 function getShapeBounds(shape) {
@@ -620,7 +1090,7 @@ function getHandlePositions(bounds) {
 }
 
 function drawSingleShape(targetCtx, shape) {
-  if (!shape) return;
+  if (!shape || shape.hidden) return;
   targetCtx.save();
   targetCtx.strokeStyle = shape.color || strokeColor;
   targetCtx.fillStyle = shape.color || strokeColor;
@@ -827,6 +1297,156 @@ function redrawCanvas(showHandles = true) {
     });
     ctx.restore();
   }
+
+  renderLayersPanel();
+}
+
+// ---------------- Layers Panel ----------------
+const LAYER_META = {
+  rect: { icon: '▢', name: 'Box' },
+  circle: { icon: '◯', name: 'Circle' },
+  line: { icon: '―', name: 'Line' },
+  arrow: { icon: '↗', name: 'Arrow' },
+  pen: { icon: '✏', name: 'Pen' },
+  highlighter: { icon: '🖌', name: 'Highlight' },
+  step: { icon: '①', name: 'Step' },
+  text: { icon: 'T', name: 'Text' },
+  blur: { icon: '▧', name: 'Blur' },
+  emoji: { icon: '✅', name: 'Sticker' }
+};
+const LAYERS_NO_SWATCH = ['blur', 'emoji'];
+
+// redrawCanvas runs on every mouse-move while dragging; rebuilding the list
+// only when something the list shows has changed keeps that cheap.
+let layersRenderKey = null;
+
+function getLayerLabel(shape, ordinal) {
+  const meta = LAYER_META[shape.type] || { icon: '?', name: shape.type };
+  if (shape.type === 'text') {
+    const t = (shape.text || '').trim();
+    return { icon: meta.icon, label: t ? (t.length > 18 ? t.slice(0, 18) + '…' : t) : 'Text' };
+  }
+  if (shape.type === 'step') return { icon: meta.icon, label: 'Step ' + (shape.stepNumber || ordinal) };
+  if (shape.type === 'emoji') return { icon: shape.emojiText || meta.icon, label: 'Sticker ' + ordinal };
+  return { icon: meta.icon, label: meta.name + ' ' + ordinal };
+}
+
+function selectLayer(id) {
+  // Moving a shape needs the Select tool; drawing tools would start a new shape instead
+  if (activeTool !== 'select') {
+    document.querySelector('.tool-btn[data-tool="select"]').click();
+  }
+  selectedShapeId = id;
+  redrawCanvas(true);
+}
+
+function toggleLayerVisibility(id) {
+  const shape = shapes.find(s => s.id === id);
+  if (!shape) return;
+  shape.hidden = !shape.hidden;
+  if (shape.hidden && selectedShapeId === id) selectedShapeId = null;
+  redrawCanvas(true);
+  saveCanvasState();
+}
+
+// direction +1 brings the layer forward (drawn later, on top), -1 sends it back
+function moveLayer(id, direction) {
+  const i = shapes.findIndex(s => s.id === id);
+  const j = i + direction;
+  if (i < 0 || j < 0 || j >= shapes.length) return;
+  [shapes[i], shapes[j]] = [shapes[j], shapes[i]];
+  redrawCanvas(true);
+  saveCanvasState();
+}
+
+function deleteLayer(id) {
+  shapes = shapes.filter(s => s.id !== id);
+  if (selectedShapeId === id) selectedShapeId = null;
+  redrawCanvas(true);
+  saveCanvasState();
+}
+
+function makeLayerButton(text, title, onClick, extraClass, disabled) {
+  const btn = document.createElement('button');
+  btn.className = 'layer-btn' + (extraClass ? ' ' + extraClass : '');
+  btn.textContent = text;
+  btn.title = title;
+  btn.disabled = !!disabled;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    onClick();
+  });
+  return btn;
+}
+
+function renderLayersPanel() {
+  const list = document.getElementById('layersList');
+  const count = document.getElementById('layersCount');
+  if (!list || !count) return;
+
+  const key = selectedShapeId + '|' + shapes.map(s =>
+    [s.id, s.type, s.color, s.hidden ? 1 : 0, s.text, s.stepNumber, s.emojiText].join(':')
+  ).join(',');
+  if (key === layersRenderKey) return;
+  layersRenderKey = key;
+
+  count.textContent = shapes.length;
+  list.textContent = '';
+
+  if (shapes.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'layers-empty';
+    empty.textContent = 'No layers yet. Blur, arrows, text and other markup will be listed here.';
+    list.appendChild(empty);
+    return;
+  }
+
+  // Per-type numbering follows creation order (bottom layer = 1)
+  const typeCounts = {};
+  const ordinals = shapes.map(s => (typeCounts[s.type] = (typeCounts[s.type] || 0) + 1));
+
+  let selectedRow = null;
+  // Topmost layer first, like a design tool's layer stack
+  for (let i = shapes.length - 1; i >= 0; i--) {
+    const shape = shapes[i];
+    const { icon, label } = getLayerLabel(shape, ordinals[i]);
+
+    const row = document.createElement('div');
+    row.className = 'layer-row'
+      + (shape.id === selectedShapeId ? ' selected' : '')
+      + (shape.hidden ? ' hidden-layer' : '');
+    row.addEventListener('click', () => selectLayer(shape.id));
+
+    if (!LAYERS_NO_SWATCH.includes(shape.type)) {
+      const swatch = document.createElement('span');
+      swatch.className = 'layer-swatch';
+      swatch.style.background = shape.color || strokeColor;
+      row.appendChild(swatch);
+    }
+
+    const iconEl = document.createElement('span');
+    iconEl.className = 'layer-icon';
+    iconEl.textContent = icon;
+    row.appendChild(iconEl);
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'layer-name';
+    nameEl.textContent = label;
+    row.appendChild(nameEl);
+
+    const actions = document.createElement('div');
+    actions.className = 'layer-actions';
+    actions.appendChild(makeLayerButton(shape.hidden ? '🚫' : '👁', shape.hidden ? 'Show layer' : 'Hide layer', () => toggleLayerVisibility(shape.id)));
+    actions.appendChild(makeLayerButton('↑', 'Bring forward', () => moveLayer(shape.id, 1), '', i === shapes.length - 1));
+    actions.appendChild(makeLayerButton('↓', 'Send backward', () => moveLayer(shape.id, -1), '', i === 0));
+    actions.appendChild(makeLayerButton('🗑', 'Delete layer', () => deleteLayer(shape.id), 'danger'));
+    row.appendChild(actions);
+
+    list.appendChild(row);
+    if (shape.id === selectedShapeId) selectedRow = row;
+  }
+
+  if (selectedRow) selectedRow.scrollIntoView({ block: 'nearest' });
 }
 
 function hitTestHandle(shape, cx, cy) {
@@ -844,6 +1464,7 @@ function hitTestHandle(shape, cx, cy) {
 }
 
 function hitTestShape(shape, cx, cy) {
+  if (shape.hidden) return false;
   const bounds = getShapeBounds(shape);
   const pad = 8;
   return (
@@ -927,33 +1548,44 @@ function cancelCropMode() {
   redrawCanvas(true);
 }
 
+// Keep the crop box fully inside the image.
+function clampCropRect() {
+  cropRect.w = Math.min(cropRect.w, canvas.width);
+  cropRect.h = Math.min(cropRect.h, canvas.height);
+  cropRect.x = Math.max(0, Math.min(canvas.width - cropRect.w, cropRect.x));
+  cropRect.y = Math.max(0, Math.min(canvas.height - cropRect.h, cropRect.y));
+}
+
 if (btnCropMode) btnCropMode.addEventListener('click', startCropMode);
 if (btnCancelCrop) btnCancelCrop.addEventListener('click', cancelCropMode);
 
 if (btnApplyCrop) {
   btnApplyCrop.addEventListener('click', () => {
-    if (!isCropMode || cropRect.w < 20 || cropRect.h < 20) return;
+    if (!isCropMode) return;
+    clampCropRect();
+    if (cropRect.w < 20 || cropRect.h < 20) return;
 
+    const cropX = Math.round(cropRect.x);
+    const cropY = Math.round(cropRect.y);
+    const cropW = Math.round(cropRect.w);
+    const cropH = Math.round(cropRect.h);
+
+    // Crop only the base image. Shapes stay editable objects (shifted by the
+    // crop offset below); baking them in here would draw them twice.
     const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = Math.round(cropRect.w);
-    cropCanvas.height = Math.round(cropRect.h);
+    cropCanvas.width = cropW;
+    cropCanvas.height = cropH;
     const cropCtx = cropCanvas.getContext('2d');
+    if (screenshotImage && screenshotImage.naturalWidth > 0) {
+      cropCtx.drawImage(screenshotImage, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+    }
 
-    // Render clean shapes and background onto temporary canvas
-    redrawCanvas(false);
-    cropCtx.drawImage(canvas, Math.round(cropRect.x), Math.round(cropRect.y), cropCanvas.width, cropCanvas.height, 0, 0, cropCanvas.width, cropCanvas.height);
+    const croppedImage = new Image();
+    croppedImage.onload = () => {
+      screenshotImage = croppedImage;
+      canvas.width = cropW;
+      canvas.height = cropH;
 
-    // Update screenshotImage and shapes coordinates relative to crop
-    const croppedDataUrl = cropCanvas.toDataURL('image/png');
-    const cropX = cropRect.x;
-    const cropY = cropRect.y;
-
-    screenshotImage = new Image();
-    screenshotImage.onload = () => {
-      canvas.width = cropCanvas.width;
-      canvas.height = cropCanvas.height;
-
-      // Adjust existing shapes to new crop offset
       shapes.forEach(s => {
         s.x -= cropX;
         s.y -= cropY;
@@ -965,10 +1597,13 @@ if (btnApplyCrop) {
         }
       });
 
+      // Earlier snapshots use pre-crop coordinates, so history restarts here.
+      canvasHistory = [JSON.stringify(shapes)];
+      imageModified = true;
+      selectedShapeId = null;
       cancelCropMode();
-      saveCanvasState();
     };
-    screenshotImage.src = croppedDataUrl;
+    croppedImage.src = cropCanvas.toDataURL('image/png');
   });
 }
 
@@ -992,16 +1627,21 @@ if (btnToggleZoom) {
 }
 
 // Color picker updates selected object live
-document.getElementById('markupColorPicker').addEventListener('input', (e) => {
+// 'input' fires continuously while dragging inside the picker, so it only
+// previews the color; the undo snapshot is taken once on 'change'.
+const markupColorPicker = document.getElementById('markupColorPicker');
+markupColorPicker.addEventListener('input', (e) => {
   strokeColor = e.target.value;
   if (selectedShapeId) {
     const shape = shapes.find(s => s.id === selectedShapeId);
     if (shape) {
       shape.color = strokeColor;
       redrawCanvas(true);
-      saveCanvasState();
     }
   }
+});
+markupColorPicker.addEventListener('change', () => {
+  if (selectedShapeId) saveCanvasState();
 });
 
 // Delete selected object
@@ -1025,22 +1665,26 @@ window.addEventListener('keydown', (e) => {
     if (document.activeElement && (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'TEXTAREA')) {
       return;
     }
+    // Only act while the editor is on screen, not from other views.
+    if (getComputedStyle(editorView).display === 'none') return;
     deleteSelectedShape();
   }
 });
 
-// Undo
+// Undo: step back through every change (draw, move, resize, recolor, delete, clear)
 document.getElementById('btnUndo').addEventListener('click', () => {
-  if (shapes.length > 0) {
-    shapes.pop();
+  if (canvasHistory.length > 1) {
+    canvasHistory.pop();
+    shapes = JSON.parse(canvasHistory[canvasHistory.length - 1]);
     selectedShapeId = null;
+    syncStepCounter();
     redrawCanvas(true);
-    saveCanvasState();
   }
 });
 
 // Clear
 document.getElementById('btnClearCanvas').addEventListener('click', () => {
+  if (shapes.length === 0) return;
   shapes = [];
   selectedShapeId = null;
   stepCounter = 1;
@@ -1049,45 +1693,152 @@ document.getElementById('btnClearCanvas').addEventListener('click', () => {
 });
 
 // ---------------- Download Location & Storage Quota Management ----------------
-function downloadMediaFile(dataUrlOrBlob, filename) {
-  chrome.storage.local.get(['save_location_mode'], (res) => {
-    const mode = res.save_location_mode || 'prompt';
-    const promptSave = mode === 'prompt';
+function getStorageValues(keys) {
+  return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
+}
 
-    let url = dataUrlOrBlob;
-    if (dataUrlOrBlob instanceof Blob) {
-      url = URL.createObjectURL(dataUrlOrBlob);
-    }
+function showToast(message, isError) {
+  const el = document.createElement('div');
+  el.textContent = message;
+  el.style.cssText = 'position: fixed; bottom: 24px; right: 24px; z-index: 99999; max-width: 380px; padding: 12px 16px; border-radius: 10px; font-size: 13px; font-weight: 600; color: #fff; box-shadow: 0 6px 20px rgba(0,0,0,0.2); background: ' + (isError ? '#dc2626' : '#16a34a') + ';';
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
 
-    if (chrome.downloads && chrome.downloads.download) {
-      chrome.downloads.download({
-        url: url,
-        filename: filename,
-        saveAs: promptSave
-      }, (downloadId) => {
-        if (chrome.runtime.lastError) {
-          console.warn('chrome.downloads failed, falling back to anchor tag:', chrome.runtime.lastError);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = filename;
-          a.click();
-        }
-      });
-    } else {
+// Resolves { status: 'saved' | 'canceled', downloadId } - 'canceled' means the
+// user dismissed the Save As dialog. downloadId is undefined for the anchor fallback.
+function downloadViaBrowser(blob, filename, promptSave) {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(blob);
+    // Give the browser time to start reading the blob before releasing it
+    const release = () => setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+    const anchorFallback = () => {
       const a = document.createElement('a');
       a.href = url;
       a.download = filename;
       a.click();
+      release();
+      resolve({ status: 'saved' });
+    };
+
+    if (!(chrome.downloads && chrome.downloads.download)) {
+      anchorFallback();
+      return;
     }
+
+    chrome.downloads.download({ url, filename, saveAs: promptSave }, (downloadId) => {
+      const err = chrome.runtime.lastError;
+      if (!err && downloadId !== undefined) {
+        release();
+        resolve({ status: 'saved', downloadId });
+      } else if (err && /cancel/i.test(err.message || '')) {
+        URL.revokeObjectURL(url);
+        resolve({ status: 'canceled' });
+      } else {
+        console.warn('chrome.downloads failed, falling back to anchor tag:', err);
+        anchorFallback();
+      }
+    });
   });
 }
 
-function autoStoreScreenshot(dataUrl) {
-  const id = 'shot_' + Date.now();
+async function writeToChosenFolder(dirHandle, blob, filename) {
+  const opts = { mode: 'readwrite' };
+  let perm = await dirHandle.queryPermission(opts);
+  if (perm !== 'granted') perm = await dirHandle.requestPermission(opts);
+  if (perm !== 'granted') throw new Error('Folder permission ' + perm);
+
+  const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+  const writable = await fileHandle.createWritable();
+  await writable.write(blob);
+  await writable.close();
+}
+
+// Saves a Blob / data URL according to the save-location setting.
+// Resolves { status: 'saved' | 'canceled', where, fallbackReason }.
+async function saveMediaFile(source, filename) {
+  // Data URLs are capped at ~2 MB by chrome.downloads, so always hand it a Blob
+  // (a full-page screenshot PNG is easily larger than that).
+  const blob = source instanceof Blob ? source : await (await fetch(source)).blob();
+  const { save_location_mode } = await getStorageValues(['save_location_mode']);
+  const mode = save_location_mode || 'prompt';
+  let fallbackReason = null;
+
+  if (mode === 'folder') {
+    const dirHandle = await getSavedDirHandle();
+    if (!dirHandle) {
+      fallbackReason = 'No save folder is set';
+    } else {
+      try {
+        await writeToChosenFolder(dirHandle, blob, filename);
+        return { status: 'saved', where: dirHandle.name + '\\' + filename };
+      } catch (err) {
+        console.warn('Writing to chosen folder failed, falling back to Downloads', err);
+        fallbackReason = 'Could not write to "' + dirHandle.name + '" (access may need re-approval - use the Download button to grant it again)';
+      }
+    }
+  }
+
+  const promptSave = mode === 'prompt';
+  const { status, downloadId } = await downloadViaBrowser(blob, filename, promptSave);
+  return { status, downloadId, where: promptSave ? 'the location you picked' : 'your Downloads folder', fallbackReason };
+}
+
+// Asks Chrome what actually happened to a download, so "saved" means the file
+// is on disk. Resolves { state: 'complete' | 'interrupted' | 'pending', path, error }.
+function verifyDownload(downloadId, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    if (!(chrome.downloads && chrome.downloads.search) || downloadId === undefined) {
+      resolve({ state: 'pending' });
+      return;
+    }
+    const startedAt = Date.now();
+    const poll = () => {
+      chrome.downloads.search({ id: downloadId }, (items) => {
+        const item = items && items[0];
+        if (item && item.state === 'complete') {
+          resolve({ state: 'complete', path: item.filename });
+        } else if (item && item.state === 'interrupted') {
+          resolve({ state: 'interrupted', error: item.error || 'UNKNOWN' });
+        } else if (Date.now() - startedAt > timeoutMs) {
+          resolve({ state: 'pending', path: item && item.filename });
+        } else {
+          setTimeout(poll, 300);
+        }
+      });
+    };
+    poll();
+  });
+}
+
+async function downloadMediaFile(dataUrlOrBlob, filename) {
+  try {
+    const result = await saveMediaFile(dataUrlOrBlob, filename);
+    if (result.status === 'saved') {
+      showToast('Saved to ' + result.where + (result.fallbackReason ? ' (' + result.fallbackReason + ')' : ''), !!result.fallbackReason);
+    }
+    return result;
+  } catch (err) {
+    console.error('Saving file failed', err);
+    showToast('Could not save the file: ' + err.message, true);
+    return { status: 'failed' };
+  }
+}
+
+// Stores a screenshot in the Library and returns its id. Pass an existing id to
+// overwrite that entry's image instead of adding another one.
+function autoStoreScreenshot(dataUrl, existingId) {
+  const id = existingId || ('shot_' + Date.now());
   chrome.storage.local.set({ [id]: dataUrl, 'active_screenshot': dataUrl }, () => {
-    addLibraryIndexEntry({ id, type: 'screenshot', createdAt: Date.now() });
+    if (chrome.runtime.lastError) {
+      console.error('Failed to store screenshot', chrome.runtime.lastError.message);
+      return;
+    }
+    if (!existingId) addLibraryIndexEntry({ id, type: 'screenshot', createdAt: Date.now() });
     checkStorageQuotaAlert();
   });
+  return id;
 }
 
 async function calculateTotalStorageBytes() {
@@ -1174,7 +1925,7 @@ async function checkStorageQuotaAlert() {
         chrome.notifications.create('quota_alert_' + Date.now(), {
           type: 'basic',
           iconUrl: 'icons/icon128.png',
-          title: '⚠️ Screen Recorder Storage Warning',
+          title: 'wbify screen recorder storage warning',
           message: `Storage capacity is at ${pct}% (${usedMB.toFixed(1)} MB / ${limitMB} MB used). Please clean up saved library items!`
         });
       }
@@ -1183,17 +1934,53 @@ async function checkStorageQuotaAlert() {
 }
 
 // Settings Event Handlers
+async function refreshChosenFolderLabel() {
+  const label = document.getElementById('chosenFolderName');
+  if (!label) return;
+  const handle = await getSavedDirHandle();
+  label.textContent = handle ? 'Current folder: ' + handle.name : 'No folder chosen';
+}
+
+const btnChooseFolder = document.getElementById('btnChooseFolder');
+if (btnChooseFolder) {
+  if (!window.showDirectoryPicker) {
+    btnChooseFolder.disabled = true;
+    btnChooseFolder.title = 'Folder picking is not supported by this browser';
+  }
+  btnChooseFolder.addEventListener('click', async () => {
+    try {
+      const handle = await window.showDirectoryPicker({ id: 'awesome-recorder-save', mode: 'readwrite', startIn: 'videos' });
+      await setSavedDirHandle(handle);
+      const folderRadio = document.querySelector('input[name="saveLocationMode"][value="folder"]');
+      if (folderRadio) folderRadio.checked = true;
+      await refreshChosenFolderLabel();
+    } catch (err) {
+      if (err && err.name !== 'AbortError') {
+        console.error('Choosing save folder failed', err);
+        showToast('Could not use that folder: ' + err.message, true);
+      }
+    }
+  });
+}
+
 const btnSaveSettings = document.getElementById('btnSaveSettings');
 if (btnSaveSettings) {
-  btnSaveSettings.addEventListener('click', () => {
+  btnSaveSettings.addEventListener('click', async () => {
     const saveLocationMode = document.querySelector('input[name="saveLocationMode"]:checked')?.value || 'prompt';
     const storageLimitMB = parseInt(document.getElementById('selectStorageLimit')?.value, 10);
     const storageNotifyEnabled = document.getElementById('chkStorageNotify')?.checked !== false;
+    const autoSaveVideo = document.getElementById('chkAutoSaveVideo')?.checked !== false;
+
+    if (saveLocationMode === 'folder' && !(await getSavedDirHandle())) {
+      showToast('Click "Choose Folder…" to pick a folder first.', true);
+      return;
+    }
 
     chrome.storage.local.set({
       save_location_mode: saveLocationMode,
       storage_limit_mb: isNaN(storageLimitMB) ? 1000 : storageLimitMB,
-      storage_notify_enabled: storageNotifyEnabled
+      storage_notify_enabled: storageNotifyEnabled,
+      auto_save_video: autoSaveVideo
     }, () => {
       const msg = document.getElementById('saveSettingsMsg');
       if (msg) {
@@ -1206,7 +1993,11 @@ if (btnSaveSettings) {
 }
 
 function loadSettingsForm() {
-  chrome.storage.local.get(['save_location_mode', 'storage_limit_mb', 'storage_notify_enabled'], (res) => {
+  refreshChosenFolderLabel();
+  chrome.storage.local.get(['save_location_mode', 'storage_limit_mb', 'storage_notify_enabled', 'auto_save_video'], (res) => {
+    const chkAutoSave = document.getElementById('chkAutoSaveVideo');
+    if (chkAutoSave) chkAutoSave.checked = res.auto_save_video !== false;
+
     const mode = res.save_location_mode || 'prompt';
     const radio = document.querySelector(`input[name="saveLocationMode"][value="${mode}"]`);
     if (radio) radio.checked = true;
@@ -1231,7 +2022,11 @@ document.getElementById('btnDownloadShot').addEventListener('click', () => {
   redrawCanvas(false);
   const dataUrl = canvas.toDataURL('image/png');
   const filename = 'screenshot-markup-' + Date.now() + '.png';
-  autoStoreScreenshot(dataUrl);
+  // The original is already in the Library. Only keep the edited version, and
+  // keep updating that one entry on repeat downloads instead of adding copies.
+  if (shapes.length > 0 || imageModified || exportedShotId) {
+    exportedShotId = autoStoreScreenshot(dataUrl, exportedShotId);
+  }
   downloadMediaFile(dataUrl, filename);
   redrawCanvas(true);
 });
@@ -1261,10 +2056,16 @@ function getCanvasCoords(e) {
   };
 }
 
+// True once a move/resize drag actually changed a shape, so one undo
+// snapshot is taken on release instead of one per mouse-move.
+let shapeDragChanged = false;
+
 canvas.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return;
   const { x, y } = getCanvasCoords(e);
   dragStartX = x;
   dragStartY = y;
+  shapeDragChanged = false;
 
   // Crop Mode Interactions
   if (isCropMode) {
@@ -1294,29 +2095,24 @@ canvas.addEventListener('mousedown', (e) => {
     }
   }
 
-  // 2. Check if clicking on an existing shape
-  let clickedShape = null;
-  for (let i = shapes.length - 1; i >= 0; i--) {
-    if (hitTestShape(shapes[i], x, y)) {
-      clickedShape = shapes[i];
-      break;
-    }
-  }
-
-  if (clickedShape) {
-    selectedShapeId = clickedShape.id;
-    isDraggingShape = true;
-    document.querySelectorAll('.tool-btn[data-tool]').forEach(b => b.classList.remove('active'));
-    const btnSelect = document.querySelector('.tool-btn[data-tool="select"]');
-    if (btnSelect) btnSelect.classList.add('active');
-    activeTool = 'select';
-    redrawCanvas(true);
-    return;
-  }
-
-  // 3. Clicking empty space
+  // 2. Select tool: pick up / move an existing shape, or deselect on empty space.
+  // Other tools always draw, so a new shape can start on top of an existing one
+  // and the tool stays active for the next shape.
   if (activeTool === 'select') {
-    selectedShapeId = null;
+    let clickedShape = null;
+    for (let i = shapes.length - 1; i >= 0; i--) {
+      if (hitTestShape(shapes[i], x, y)) {
+        clickedShape = shapes[i];
+        break;
+      }
+    }
+
+    if (clickedShape) {
+      selectedShapeId = clickedShape.id;
+      isDraggingShape = true;
+    } else {
+      selectedShapeId = null;
+    }
     redrawCanvas(true);
     return;
   }
@@ -1404,7 +2200,39 @@ canvas.addEventListener('mousedown', (e) => {
   }
 });
 
-canvas.addEventListener('mousemove', (e) => {
+// Moves the edges named by the handle, keeping the shape's direction
+// (an arrow drawn right-to-left has a negative w) so the dragged handle
+// always moves the edge under it.
+function resizeShapeByHandle(shape, handle, dx, dy) {
+  const MIN = 4;
+
+  if (handle.includes('e') || handle.includes('w')) {
+    let left = Math.min(shape.x, shape.x + shape.w);
+    let right = Math.max(shape.x, shape.x + shape.w);
+    if (handle.includes('w')) left = Math.min(left + dx, right - MIN);
+    else right = Math.max(right + dx, left + MIN);
+    const forward = shape.w >= 0;
+    shape.x = forward ? left : right;
+    shape.w = forward ? right - left : left - right;
+  }
+
+  if (handle.includes('n') || handle.includes('s')) {
+    let top = Math.min(shape.y, shape.y + shape.h);
+    let bottom = Math.max(shape.y, shape.y + shape.h);
+    if (handle.includes('n')) top = Math.min(top + dy, bottom - MIN);
+    else bottom = Math.max(bottom + dy, top + MIN);
+    const forward = shape.h >= 0;
+    shape.y = forward ? top : bottom;
+    shape.h = forward ? bottom - top : top - bottom;
+  }
+}
+
+window.addEventListener('mousemove', (e) => {
+  const dragging = isDrawing || isDraggingShape || isResizingShape || isDraggingCrop || isResizingCrop;
+  // Listening on window lets a drag continue past the canvas edge; otherwise
+  // only react while the pointer is over the canvas.
+  if (!dragging && e.target !== canvas) return;
+
   const { x, y } = getCanvasCoords(e);
 
   // Crop Mode Dragging / Resizing
@@ -1415,11 +2243,17 @@ canvas.addEventListener('mousemove', (e) => {
       const dy = y - dragStartY;
       dragStartX = x;
       dragStartY = y;
-      const h = activeCropHandle;
-      if (h.includes('e')) cropRect.w = Math.max(30, cropRect.w + dx);
-      if (h.includes('s')) cropRect.h = Math.max(30, cropRect.h + dy);
-      if (h.includes('w')) { cropRect.x += dx; cropRect.w = Math.max(30, cropRect.w - dx); }
-      if (h.includes('n')) { cropRect.y += dy; cropRect.h = Math.max(30, cropRect.h - dy); }
+      const hd = activeCropHandle;
+      const MIN = 30;
+      let left = cropRect.x;
+      let top = cropRect.y;
+      let right = cropRect.x + cropRect.w;
+      let bottom = cropRect.y + cropRect.h;
+      if (hd.includes('e')) right = Math.max(left + MIN, Math.min(canvas.width, right + dx));
+      if (hd.includes('w')) left = Math.min(right - MIN, Math.max(0, left + dx));
+      if (hd.includes('s')) bottom = Math.max(top + MIN, Math.min(canvas.height, bottom + dy));
+      if (hd.includes('n')) top = Math.min(bottom - MIN, Math.max(0, top + dy));
+      cropRect = { x: left, y: top, w: right - left, h: bottom - top };
       redrawCanvas(true);
       return;
     }
@@ -1444,7 +2278,7 @@ canvas.addEventListener('mousemove', (e) => {
       const selectedShape = shapes.find(s => s.id === selectedShapeId);
       handleHover = hitTestHandle(selectedShape, x, y);
     }
-    if (!handleHover) {
+    if (!handleHover && activeTool === 'select') {
       shapeHover = shapes.some(s => hitTestShape(s, x, y));
     }
 
@@ -1480,15 +2314,15 @@ canvas.addEventListener('mousemove', (e) => {
           p.y = bounds.y + (p.y - bounds.y) * scaleY + (h.includes('n') ? dy : 0);
         });
       } else {
-        if (h.includes('e')) shape.w += dx;
-        if (h.includes('s')) shape.h += dy;
-        if (h.includes('w')) { shape.x += dx; shape.w -= dx; }
-        if (h.includes('n')) { shape.y += dy; shape.h -= dy; }
+        resizeShapeByHandle(shape, h, dx, dy);
 
         if (shape.type === 'text') {
-          shape.fontSize = Math.max(12, Math.min(96, (shape.fontSize || 22) + dy * 0.2));
+          // Dragging the bottom edge down or the top edge up grows the text
+          const growth = h.includes('n') ? -dy : h.includes('s') ? dy : 0;
+          shape.fontSize = Math.max(12, Math.min(96, (shape.fontSize || 22) + growth * 0.2));
         }
       }
+      shapeDragChanged = true;
       redrawCanvas(true);
     }
     return;
@@ -1511,6 +2345,7 @@ canvas.addEventListener('mousemove', (e) => {
           p.y += dy;
         });
       }
+      shapeDragChanged = true;
       redrawCanvas(true);
     }
     return;
@@ -1528,7 +2363,11 @@ canvas.addEventListener('mousemove', (e) => {
   }
 });
 
-canvas.addEventListener('mouseup', () => {
+// On window (not the canvas) so releasing the button outside the canvas still
+// ends the drag instead of leaving the shape stuck to the cursor.
+window.addEventListener('mouseup', () => {
+  if (!(isDrawing || isDraggingShape || isResizingShape || isDraggingCrop || isResizingCrop)) return;
+
   if (isCropMode) {
     isDraggingCrop = false;
     isResizingCrop = false;
@@ -1536,14 +2375,22 @@ canvas.addEventListener('mouseup', () => {
     return;
   }
 
+  if ((isDraggingShape || isResizingShape) && shapeDragChanged) {
+    saveCanvasState();
+  }
+  shapeDragChanged = false;
+
   if (isDrawing && currentLiveShape) {
-    if ((currentLiveShape.type !== 'pen' && currentLiveShape.type !== 'highlighter') || (currentLiveShape.points && currentLiveShape.points.length > 1)) {
+    const isFreehand = currentLiveShape.type === 'pen' || currentLiveShape.type === 'highlighter';
+    // A plain click (no real drag) must not leave an invisible zero-size shape behind
+    const hasSize = isFreehand
+      ? currentLiveShape.points && currentLiveShape.points.length > 1
+      : Math.abs(currentLiveShape.w) >= 3 || Math.abs(currentLiveShape.h) >= 3;
+    if (hasSize) {
+      // The tool stays active so several shapes can be drawn in a row;
+      // the new shape is left selected so its handles can be used right away.
       shapes.push(currentLiveShape);
       selectedShapeId = currentLiveShape.id;
-      document.querySelectorAll('.tool-btn[data-tool]').forEach(b => b.classList.remove('active'));
-      const btnSelect = document.querySelector('.tool-btn[data-tool="select"]');
-      if (btnSelect) btnSelect.classList.add('active');
-      activeTool = 'select';
       saveCanvasState();
     }
   }
@@ -1559,12 +2406,14 @@ canvas.addEventListener('mouseup', () => {
 // Double click shape to edit text or step number
 canvas.addEventListener('dblclick', (e) => {
   const { x, y } = getCanvasCoords(e);
-  const clicked = shapes.find(s => hitTestShape(s, x, y));
+  // Topmost shape first, matching what mousedown selects
+  const clicked = [...shapes].reverse().find(s => hitTestShape(s, x, y));
   if (clicked) {
     if (clicked.type === 'text') {
       const updatedText = prompt('Edit text annotation:', clicked.text);
       if (updatedText !== null) {
         if (updatedText.trim() === '') {
+          selectedShapeId = clicked.id;
           deleteSelectedShape();
         } else {
           clicked.text = updatedText;
@@ -1588,6 +2437,11 @@ const previewModal = document.getElementById('previewModal');
 const previewModalContent = document.getElementById('previewModalContent');
 
 function closePreviewModal() {
+  const video = previewModalContent.querySelector('video');
+  if (video) {
+    video.pause();
+    if (video.src.startsWith('blob:')) URL.revokeObjectURL(video.src);
+  }
   previewModalContent.innerHTML = '';
   previewModal.style.display = 'none';
 }
@@ -1647,7 +2501,7 @@ function renderLibrary() {
 
       const meta = document.createElement('div');
       meta.className = 'lib-meta';
-      meta.textContent = (isVideo ? `Duration: ${formatTime(item.duration || 0)} • WebM • ` : '') + formatLibDate(item.createdAt);
+      meta.textContent = (isVideo ? `Duration: ${formatTime(item.duration || 0)} • ${(item.format || 'webm').toUpperCase()} • ` : '') + formatLibDate(item.createdAt);
       body.appendChild(meta);
 
       const actions = document.createElement('div');
@@ -1668,6 +2522,15 @@ function renderLibrary() {
         }
       });
       actions.appendChild(btnPreview);
+
+      if (isVideo) {
+        const btnEdit = document.createElement('button');
+        btnEdit.className = 'btn-secondary';
+        btnEdit.style.cssText = 'flex:1; justify-content:center;';
+        btnEdit.textContent = '✂ Edit';
+        btnEdit.addEventListener('click', () => openLibraryVideoInEditor(item));
+        actions.appendChild(btnEdit);
+      }
 
       const btnDownload = document.createElement('button');
       btnDownload.className = 'btn-secondary';
@@ -1717,7 +2580,7 @@ function downloadLibraryItem(item) {
         alert('This recording could not be found (it may have been deleted).');
         return;
       }
-      const filename = 'screen-recording-' + item.id + '.webm';
+      const filename = 'screen-recording-' + item.id + '.' + containerOfBlob(blob);
       downloadMediaFile(blob, filename);
     });
   } else {
@@ -1745,23 +2608,300 @@ function deleteLibraryItem(item, cardEl) {
   }
 }
 
+// ---------------- Basic Video Editor ----------------
+// Trim, speed, mute and downscale. The actual work is done by exportEditedVideo()
+// in video-export.js; this section is the screen around it.
+const editVideoEl = document.getElementById('editVideoEl');
+const editStartRange = document.getElementById('editStartRange');
+const editEndRange = document.getElementById('editEndRange');
+const editStartLabel = document.getElementById('editStartLabel');
+const editEndLabel = document.getElementById('editEndLabel');
+const editSpeedSelect = document.getElementById('editSpeedSelect');
+const editSizeSelect = document.getElementById('editSizeSelect');
+const editFormatSelect = document.getElementById('editFormatSelect');
+const editMuteChk = document.getElementById('editMuteChk');
+const editResultLength = document.getElementById('editResultLength');
+const editProgressWrap = document.getElementById('editProgressWrap');
+const editProgressBar = document.getElementById('editProgressBar');
+const editProgressText = document.getElementById('editProgressText');
+const editResultWrap = document.getElementById('editResultWrap');
+const editResultVideo = document.getElementById('editResultVideo');
+const btnSetStart = document.getElementById('btnSetStart');
+const btnSetEnd = document.getElementById('btnSetEnd');
+const btnEditBack = document.getElementById('btnEditBack');
+const btnEditPreview = document.getElementById('btnEditPreview');
+const btnEditSaveResult = document.getElementById('btnEditSaveResult');
+const btnEditCancel = document.getElementById('btnEditCancel');
+const btnEditExport = document.getElementById('btnEditExport');
+
+const EDIT_MIN_LENGTH = 0.1;
+let editSource = null;        // { blob, duration }
+let editSourceUrl = null;
+let editReturnTo = 'studio';  // where "Back" goes: 'review' | 'library' | 'studio'
+let editAbort = null;         // AbortController while an export is running
+let editResult = null;        // { blob, filename } of the latest export
+let editPreviewingRange = false;
+
+function formatEditTime(seconds) {
+  const tenths = Math.round(Math.max(0, seconds) * 10);
+  const m = Math.floor(tenths / 600);
+  const s = (tenths % 600) / 10;
+  return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1);
+}
+
+function getEditRange() {
+  return { start: parseFloat(editStartRange.value), end: parseFloat(editEndRange.value) };
+}
+
+function getEditSpeed() {
+  return parseFloat(editSpeedSelect.value) || 1;
+}
+
+function refreshEditLabels() {
+  const { start, end } = getEditRange();
+  editStartLabel.textContent = formatEditTime(start);
+  editEndLabel.textContent = formatEditTime(end);
+  editResultLength.textContent = formatEditTime((end - start) / getEditSpeed());
+}
+
+function resetEditorUi() {
+  editProgressWrap.style.display = 'none';
+  editResultWrap.style.display = 'none';
+  btnEditSaveResult.style.display = 'none';
+  setVideoSaveStatus('', false, undefined, EDIT_STATUS);
+  if (editResultVideo.src.startsWith('blob:')) URL.revokeObjectURL(editResultVideo.src);
+  editResultVideo.removeAttribute('src');
+  editResult = null;
+  editPreviewingRange = false;
+  editSpeedSelect.value = '1';
+  editSizeSelect.value = '0';
+  editMuteChk.checked = false;
+  editVideoEl.muted = false;
+  editVideoEl.playbackRate = 1;
+}
+
+async function openVideoEditor(blob, durationHint, returnTo) {
+  editReturnTo = returnTo || 'studio';
+  switchView('videoedit');
+  resetEditorUi();
+
+  let info;
+  try {
+    info = await probeVideo(blob, durationHint);
+  } catch (err) {
+    console.error('Could not open video for editing', err);
+    showToast('Could not open this video for editing: ' + err.message, true);
+    leaveVideoEditor();
+    return;
+  }
+  if (!info.duration) {
+    showToast('This video has no readable length, so it cannot be edited.', true);
+    leaveVideoEditor();
+    return;
+  }
+
+  editSource = { blob, duration: info.duration };
+  if (editSourceUrl) URL.revokeObjectURL(editSourceUrl);
+  editSourceUrl = URL.createObjectURL(blob);
+  editVideoEl.src = editSourceUrl;
+
+  const max = Math.max(EDIT_MIN_LENGTH, Math.floor(info.duration * 10) / 10);
+  editStartRange.max = editEndRange.max = String(max);
+  editStartRange.value = '0';
+  editEndRange.value = String(max);
+
+  // Offer only formats this browser can actually record
+  const mp4Ok = (pickRecorderMimeType(true) || {}).container === 'mp4';
+  editFormatSelect.querySelector('option[value="mp4"]').disabled = !mp4Ok;
+  editFormatSelect.value = mp4Ok ? 'mp4' : 'webm';
+
+  refreshEditLabels();
+}
+
+function leaveVideoEditor() {
+  if (editReturnTo === 'library') {
+    switchView('library');
+  } else if (editReturnTo === 'review' && currentRecordedBlob) {
+    switchView('studio');
+    cardLauncher.style.display = 'none';
+    cardReviewVideo.style.display = 'block';
+  } else {
+    switchView('studio');
+  }
+}
+
+function openLibraryVideoInEditor(item) {
+  getVideoBlob(item.id).then((blob) => {
+    if (!blob) {
+      alert('This recording could not be found (it may have been deleted).');
+      return;
+    }
+    openVideoEditor(blob, item.duration, 'library');
+  }).catch((err) => {
+    console.error('Failed to load recording for editing', err);
+    alert('Failed to load this recording.');
+  });
+}
+
+// Trim sliders: keep at least EDIT_MIN_LENGTH between start and end, and show the frame being adjusted
+editStartRange.addEventListener('input', () => {
+  const { start, end } = getEditRange();
+  if (start > end - EDIT_MIN_LENGTH) editStartRange.value = String(Math.max(0, end - EDIT_MIN_LENGTH));
+  editVideoEl.currentTime = parseFloat(editStartRange.value);
+  refreshEditLabels();
+});
+
+editEndRange.addEventListener('input', () => {
+  const { start, end } = getEditRange();
+  if (end < start + EDIT_MIN_LENGTH) editEndRange.value = String(Math.min(parseFloat(editEndRange.max), start + EDIT_MIN_LENGTH));
+  editVideoEl.currentTime = parseFloat(editEndRange.value);
+  refreshEditLabels();
+});
+
+btnSetStart.addEventListener('click', () => {
+  const { end } = getEditRange();
+  const t = Math.round(editVideoEl.currentTime * 10) / 10;
+  editStartRange.value = String(Math.max(0, Math.min(t, end - EDIT_MIN_LENGTH)));
+  refreshEditLabels();
+});
+
+btnSetEnd.addEventListener('click', () => {
+  const { start } = getEditRange();
+  const t = Math.round(editVideoEl.currentTime * 10) / 10;
+  editEndRange.value = String(Math.min(parseFloat(editEndRange.max), Math.max(t, start + EDIT_MIN_LENGTH)));
+  refreshEditLabels();
+});
+
+editSpeedSelect.addEventListener('change', () => {
+  editVideoEl.playbackRate = getEditSpeed();
+  refreshEditLabels();
+});
+
+editMuteChk.addEventListener('change', () => {
+  editVideoEl.muted = editMuteChk.checked;
+});
+
+// Preview plays only the selected range, at the chosen speed and mute setting
+btnEditPreview.addEventListener('click', () => {
+  const { start } = getEditRange();
+  editVideoEl.muted = editMuteChk.checked;
+  editVideoEl.playbackRate = getEditSpeed();
+  editVideoEl.currentTime = start;
+  editPreviewingRange = true;
+  editVideoEl.play().catch(() => { editPreviewingRange = false; });
+});
+
+editVideoEl.addEventListener('timeupdate', () => {
+  if (editPreviewingRange && editVideoEl.currentTime >= getEditRange().end) {
+    editVideoEl.pause();
+    editPreviewingRange = false;
+  }
+});
+editVideoEl.addEventListener('pause', () => { editPreviewingRange = false; });
+
+btnEditBack.addEventListener('click', leaveVideoEditor);
+
+function setExportingUi(exporting) {
+  [btnEditExport, btnEditPreview, btnEditBack, btnSetStart, btnSetEnd, editStartRange, editEndRange,
+    editSpeedSelect, editSizeSelect, editFormatSelect, editMuteChk].forEach((el) => { el.disabled = exporting; });
+  btnEditCancel.style.display = exporting ? 'inline-flex' : 'none';
+  editProgressWrap.style.display = exporting ? 'block' : 'none';
+  if (exporting) {
+    editProgressBar.style.width = '0%';
+    editProgressText.textContent = 'Starting export...';
+  }
+}
+
+let lastProgressPaint = 0;
+function updateExportProgress(fraction, state) {
+  const now = performance.now();
+  if (now - lastProgressPaint < 200 && fraction < 1) return;
+  lastProgressPaint = now;
+  const pct = Math.round(fraction * 100);
+  editProgressBar.style.width = pct + '%';
+  editProgressText.textContent = 'Exporting... ' + pct + '%' +
+    (state && state.hidden ? ' - keep this tab in front: the picture freezes while it is in the background.' : '');
+}
+
+btnEditCancel.addEventListener('click', () => {
+  if (editAbort) editAbort.abort();
+});
+
+btnEditExport.addEventListener('click', async () => {
+  if (!editSource || editAbort) return;
+  const { start, end } = getEditRange();
+  editVideoEl.pause();
+  editResultWrap.style.display = 'none';
+  btnEditSaveResult.style.display = 'none';
+  setVideoSaveStatus('', false, undefined, EDIT_STATUS);
+  setExportingUi(true);
+  editAbort = new AbortController();
+
+  try {
+    const result = await exportEditedVideo(editSource.blob, {
+      start,
+      end,
+      speed: getEditSpeed(),
+      mute: editMuteChk.checked,
+      targetHeight: parseInt(editSizeSelect.value, 10) || 0,
+      preferMp4: editFormatSelect.value !== 'webm',
+      signal: editAbort.signal,
+      onProgress: updateExportProgress
+    });
+
+    const filename = 'edited-video-' + Date.now() + '.' + result.container;
+    editResult = { blob: result.blob, filename };
+    if (editResultVideo.src.startsWith('blob:')) URL.revokeObjectURL(editResultVideo.src);
+    editResultVideo.src = URL.createObjectURL(result.blob);
+    editResultWrap.style.display = 'block';
+    btnEditSaveResult.textContent = 'Download edited video (' + result.container.toUpperCase() + ')';
+    btnEditSaveResult.style.display = 'inline-flex';
+
+    // Keep a copy in the Library, then write it to disk like a fresh recording
+    await saveVideoToStorage(result.blob, result.durationSeconds);
+    editAbort = null;
+    setExportingUi(false);
+    await autoSaveRecording(result.blob, filename, EDIT_STATUS);
+  } catch (err) {
+    if (err && err.name === 'AbortError') {
+      setVideoSaveStatus('Export cancelled.', true, undefined, EDIT_STATUS);
+    } else {
+      console.error('Video export failed', err);
+      setVideoSaveStatus('Export failed: ' + (err && err.message ? err.message : err), true, undefined, EDIT_STATUS);
+    }
+  } finally {
+    editAbort = null;
+    setExportingUi(false);
+  }
+});
+
+btnEditSaveResult.addEventListener('click', () => {
+  if (editResult) saveRecordingAndReport(editResult.blob, editResult.filename, EDIT_STATUS);
+});
+
 // Initial Auto-Launch Trigger
 if (initialAction === 'start_record') {
   const target = urlParams.get('target');
   startRecordingFlow(target === 'camera');
 } else if (initialAction === 'edit_screenshot') {
+  switchView('screenshot');
   const shotId = urlParams.get('id');
   if (chrome.storage && chrome.storage.local) {
     chrome.storage.local.get([shotId, 'active_screenshot'], (res) => {
       const src = res[shotId] || res['active_screenshot'];
-      if (src) initCanvasWithImage(src);
+      if (src && src.length > 50 && src !== 'data:,') {
+        initCanvasWithImage(src);
+      } else {
+        console.warn('Screenshot missing from storage or payload invalid', shotId);
+        alert('Could not display screenshot. The image may have failed to save or was too large.');
+        switchView('studio');
+      }
     });
+  } else {
+    switchView('studio');
   }
 } else if (initialView) {
-  switchView(initialView);
-  if (initialView === 'screenshot' && urlParams.get('directCapture') === '1') {
-    captureEntireScreenSnapshot();
-  }
+  switchView(['studio', 'screenshot', 'library', 'settings'].includes(initialView) ? initialView : 'studio');
 } else {
   switchView('studio');
 }
